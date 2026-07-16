@@ -2,7 +2,7 @@
 
 | 항목 | 내용 |
 |---|---|
-| 문서 버전 | v2.4 (v2.3 + 구현 세션 반영 — MVP 완료, hwax 등록, D10 개정) |
+| 문서 버전 | v2.5 (v2.4 + V1·Phase4·hwax 기동 실증 — MVP+V1 완료, 서버 0.2.0) |
 | 작성일 | 2026-07-16 |
 | 상태 | 구현 착수 가능 (미결 사항은 §15에 기본값과 함께 명시) |
 | 대상 독자 | **이 계획서를 읽고 그대로 구현하는 코딩 에이전트**, 그리고 검토자(사람) |
@@ -650,14 +650,15 @@ call get_reference_cases for worked examples.
 - [x] P3. evaluation.py 지표 + 등급 밴드 (9지표 + summary 3항목)
 - [x] P3. W110 단위 휴리스틱 (+W111/W112/W120)
 - [x] P3. get_reference_cases 내장 케이스 3종 (자가 검증 루프 테스트 포함)
-- [ ] P4. sympy 오라클 + 무작위 50케이스 대조
-- [ ] P4. 문헌 벤치마크 수치 확정·내장
-- [ ] P4. 강건성 테스트 (극단 물성, 512 ply)
-- [ ] P4. math_spec.md
-- [x] P5. 서버 instructions + `laminate://guide` 리소스 (agent_guide.md는 P4 이후)
-- [x] P5. `.mcp.json` 상호 등록 (laminate-analyzer + materialtwin) — S5 대화 시나리오 로그는 미실시
+- [x] P4. sympy 오라클(변환행렬 T·Reuter 독립 경로) + 무작위 50케이스 rtol 1e-9 대조
+- [ ] P4. 문헌 벤치마크 수치 확정·내장 (유일한 잔여 — 교과서 공표값 대조)
+- [x] P4. 강건성 테스트 (512 ply, 극단 물성비, 초박층, 각도 경계)
+- [x] P4. math_spec.md (√12 합동변환 유도, B11/A11 동치 증명, 불변량 포함)
+- [x] P5. 서버 instructions + `laminate://guide` 리소스 + agent_guide.md
+- [x] P5. `.mcp.json` 상호 등록 + **S5 시나리오 로그** (docs/s5_scenario_log.md — 두 MCP 실 stdio 세션으로 materialtwin 실측 E→적층 해석→W110 복구→리포트 체인 기록)
 - [x] P6. HTTP transport (streamable HTTP + /health) — hwax 등록 요구로 선행 구현
-- [x] P6+. HEAXHub 등록: `.portal/manifest.yaml`(schema v2 검증 통과) + `integrations/laminate-analyzer-mcp/` 오버레이. 반영은 HEAXHub 백엔드 재기동 시 자동 스캔
+- [x] P6+. **HEAXHub 등록 완료**: integrations/ 심볼릭 링크(in-tree 통합) + 스캐너 실행 → 카탈로그 등록(v0.2.0)·빌드(6.1s)·서비스 기동(9117, /health 200)·Caddy 라우트 등록까지 실증. 포털 경유 접속은 authz 게이트(team) 통과용 토큰만 남음
+- [x] V1. Tool 4종 (solve_load_response/run_sensitivity_analysis/batch_evaluate_laminates/generate_design_report) + §5.2 지표(누출/비틀림/유효상수/주강성방향/비강성/지배커플링항) + E400·E500 실트리거
 
 ---
 
@@ -767,12 +768,13 @@ call get_reference_cases for worked examples.
 - materialtwin MCP는 현재 stdio 전용이나 FastMCP transport 전환은 소규모(런 모드 인자 추가 수준) — MaterialTwinWeb 백로그(§16.4)에 병기.
 - 서버끼리는 여전히 직접 통신하지 않으므로(§16.3 원칙), "상호 발견"은 결국 **에이전트가 두 슬러그를 아는 것**으로 축소된다. 정적(슬러그 관례 고정)이 기본, 동적(`GET /apps` 질의)은 선택.
 
-**배포 전 검증 항목 (아직 미실측 — Phase 6 DoD에 포함)**
-1. streamable HTTP MCP의 SSE/chunked 응답이 상위 포털~Caddy 2단 프록시에서 버퍼링 없이 통과하는지 (`/ws` 통과 실적상 가능성 높음)
-2. `Mcp-Session-Id` 헤더의 2단 프록시 통과
-3. 포털 인증과 MCP 클라이언트 헤더(`--header`)의 공존
-4. cae00 오프라인 배포 제약(사전 빌드 산출물 배송 방식)에 MCP 서버 포함
-5. HEAXHub에 MCP 전용 스택 정의가 없음 — fastapi 스택으로 우선 진행, 필요 시 `mcp_http` 스택 추가는 HEAXHub 백로그
+**배포 전 검증 항목 (2026-07-16 실측 갱신 — 잔여는 Phase 6 DoD)**
+1. ~~DNS rebinding Host 검증~~ ✅ 해소 — 포털 Host로 421 나던 것을 loopback 바인드+프록시 경계 전제로 비활성화, 포털 도메인 Host 헤더로 200/SSE 실증
+2. HEAXHub Caddy 1단 실측 ✅ — 라우트 구조는 `forward_auth(GET /api/v1/authz) → strip_path_prefix → reverse_proxy 127.0.0.1:<port>`. 라우팅·strip 동작 확인. **SSE의 Caddy 통과는 인증 토큰 확보 후 마무리** (앱 직결로는 SSE 정상 실증)
+3. 포털 인증 실측 ✅ — visibility: team 앱은 authz 게이트가 익명 요청을 401로 차단(설계 의도). MCP 클라이언트는 `claude mcp add --transport http ... --header "Authorization: Bearer <token>"` 형태로 포털 인증을 함께 보내야 함
+4. `Mcp-Session-Id` 헤더의 프록시 통과 — 토큰 확보 후 2번과 함께 확인
+5. cae00 오프라인 배포 제약(사전 빌드 산출물 배송 방식)에 MCP 서버 포함 — 미착수
+6. HEAXHub에 MCP 전용 스택 정의가 없음 — **fastapi 스택으로 등록·빌드·기동까지 실증 완료**, 전용 스택은 불필요로 판명
 
 ---
 
@@ -817,3 +819,4 @@ call get_reference_cases for worked examples.
 12. (v2.2) §16을 **materialtwin MCP 실측 현황 기반으로 재작성** — 파사드 신설 제안 철회(도구 20종 MCP 실존), 실제 도구명·단위(E_GPa)·오류 관례(한국어 dict)·valid 규칙 반영, orientation 미노출·attributes 쓰기 불가 갭을 소규모 증분 백로그로 정리, `.mcp.json` 스코프 이슈 명시, Q6 교체·Q8(오류 언어 정합) 신설.
 13. (v2.3) §16.6 신설 — hwax portal(HEAXHub) 실측 결과 슬러그 기반 주소 체계(`/apps/{slug}/` Caddy 동적 라우트, proxy 모드, `GET /apps` 카탈로그)가 이미 존재함을 확인. 배포 시 IP:port 대신 슬러그 주소 채택, 원안 §10의 포트 스캔 정책은 로컬 HTTP 모드 한정으로 축소. 미실측 검증 5항목을 Phase 6 DoD로 이관.
 14. (v2.4, 구현 세션) MVP 구현 완료를 반영한 개정 — (a) 패키지 레이아웃 `server/` → `app/` (HEAXHub fastapi 스택 기본 entrypoint `app.main:app` 정합, §9의 파일명은 app/ 하위로 읽을 것), (b) D10 언어 규약을 한국어로 개정(Q8 채택), (c) HTTP transport를 Phase 6에서 선행 구현(hwax 등록 요구) — MCP SDK의 DNS rebinding Host 검증은 loopback 바인드+프록시 경계 전제로 비활성화(§16.6 검증 항목 1건 해소), (d) E400·E500은 트리거 경로가 V1 기능(하중응답·타임아웃)에 있어 유발 테스트 유예, (e) StreamableHTTPSessionManager는 프로세스당 1회 기동 제약 확인(운영 영향 없음), (f) HEAXHub 스키마 v2 실검증 결과 — `health_check`/`restart_policy`는 `launch` 하위, `build.type` 필수, `source.ref` 불허 (materialtwin-web 오버레이는 이 세 가지를 위반한 채 스택 기본값으로 동작 중 — 해당 프로젝트에 전달 권장).
+15. (v2.5, 완성 세션) V1 Tool 4종·§5.2 지표·sympy 오라클·강건성·math_spec/agent_guide/S5 로그 완료. hwax 등록을 심볼릭 링크 in-tree 통합으로 전환해 **카탈로그 등록(v0.2.0)·빌드·기동·Caddy 라우트까지 실증**(§16.6 검증 항목 갱신 — authz 게이트 확인, SSE 포털 통과는 토큰 확보 후). E400·E500 실트리거 확보로 v2.4(d) 유예 해소. 서버/엔진 0.2.0.

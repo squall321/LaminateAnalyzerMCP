@@ -1,7 +1,7 @@
 schema_version: 2
 id: laminate_analyzer_mcp
 name: Laminate Analyzer MCP
-version: 0.1.0
+version: 0.2.0
 owner: cae-automation
 status: beta
 app_type: web_app
@@ -14,8 +14,10 @@ description: |
   - MCP 엔드포인트: /apps/laminate_analyzer_mcp/mcp (streamable HTTP)
     에이전트 등록 예) claude mcp add --transport http laminate-analyzer <포털베이스>/apps/laminate_analyzer_mcp/mcp
   - 헬스체크: /health. 웹 UI 없음(JSON API + MCP 전용).
-  - Tool 7종: analyze_laminate(원샷 진입점), validate_laminate_input, compute_abd_matrix,
-    compute_neutral_axis, evaluate_laminate, get_reference_cases(폐형해 자가검증), get_server_info.
+  - Tool 11종: analyze_laminate(원샷 진입점), validate_laminate_input, compute_abd_matrix,
+    compute_neutral_axis, evaluate_laminate, get_reference_cases(폐형해 자가검증), get_server_info,
+    solve_load_response(하중응답·유효상수), run_sensitivity_analysis, batch_evaluate_laminates,
+    generate_design_report(ko/en).
   - 규약: laminae[0]=최하단 ply, 각도 deg CCW, unit_system 필수(SI | SI_mm).
   - materialtwin_web MCP와 연계: 실측 물성(E)을 materialtwin에서 조회해 ply 입력으로 사용
     (E_GPa→MPa ×1000, 미실측 상수는 source={"type":"assumed"}로 W120 추적).
@@ -55,8 +57,10 @@ resources:
   memory_gb: 1
   gpu: false
 
-# 현재는 로컬 개발 소스를 직접 참조한다(즉시 등록 가능). GitHub push 후에는
-# materialtwin_web처럼 {type: git, url: https://github.com/squall321/LaminateAnalyzerMCP.git}로 전환.
+# 등록 방식: HEAXHub/integrations/laminate-analyzer-mcp 가 본 리포지토리의 심볼릭 링크(in-tree 통합).
+# source에 url이 없으면 스캐너가 레거시 in-tree 빌더(python_venv, 워크스페이스=이 디렉터리)를 쓴다.
+# GitHub push 후 SIF 경로를 원하면 materialtwin_web처럼
+# {type: git, url: https://github.com/squall321/LaminateAnalyzerMCP.git}로 전환.
 source:
   type: local_path
   path: /home/koopark/claude/LaminateAnalyzerMCP

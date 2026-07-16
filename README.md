@@ -6,12 +6,16 @@ LLM 에이전트가 계산을 직접 하지 않고 이 서버를 호출한다. �
 - 계획/사양: [docs/mcp_laminate_planning.md](docs/mcp_laminate_planning.md) (수학 사양·규약·오류코드의 단일 소스)
 - 진행 상태: [checklist.md](checklist.md) · 결정 기록: [context-notes.md](context-notes.md)
 
-## Tool 7종 (MVP)
+## Tool 11종 (MVP 7 + V1 4)
 
 `analyze_laminate`(원샷 진입점) · `validate_laminate_input` · `compute_abd_matrix` ·
-`compute_neutral_axis` · `evaluate_laminate` · `get_reference_cases`(폐형해 자가검증) · `get_server_info`
+`compute_neutral_axis` · `evaluate_laminate` · `get_reference_cases`(폐형해 자가검증) · `get_server_info` ·
+`solve_load_response`(ε0/κ·유효 공학 상수) · `run_sensitivity_analysis` ·
+`batch_evaluate_laminates`(≤32) · `generate_design_report`(ko/en)
 
-핵심 규약. `laminae[0]` = 최하단 ply, 각도 deg(CCW), `unit_system` 필수(`SI` | `SI_mm`).
+핵심 규약. `laminae[0]` = 최하단 ply, 각도 deg(CCW), `unit_system` 필수(`SI` | `SI_mm`), 하중은 단위 폭당.
+에이전트용 상세 절차는 [docs/agent_guide.md](docs/agent_guide.md), 수식 유도는 [docs/math_spec.md](docs/math_spec.md),
+두 MCP 협동 실 세션 기록은 [docs/s5_scenario_log.md](docs/s5_scenario_log.md).
 
 ## 실행
 
@@ -24,14 +28,17 @@ LLM 에이전트가 계산을 직접 하지 않고 이 서버를 호출한다. �
 # → GET /health, MCP는 POST /mcp (streamable HTTP)
 ```
 
-## hwax portal(HEAXHub) 등록
+## hwax portal(HEAXHub) 등록 — 완료
 
-`.portal/manifest.yaml`(schema v2)이 정본이고, `HEAXHub/integrations/laminate-analyzer-mcp/`에
-오버레이가 배치되어 있다. HEAXHub 재기동 시 자동 스캔되어 `/apps/laminate_analyzer_mcp/`로 서빙된다.
+`HEAXHub/integrations/laminate-analyzer-mcp`가 이 리포지토리의 **심볼릭 링크**(in-tree 통합)이고,
+`.portal/manifest.yaml`(schema v2)이 정본이다. 카탈로그 등록·빌드·서비스 기동·Caddy 라우트까지
+실증 완료(2026-07-16). Caddy 라우트는 `forward_auth(/api/v1/authz) → prefix strip → 127.0.0.1:<port>`
+구조라 포털 경유 접속에는 **포털 인증**이 필요하다(visibility: team).
 
 ```bash
-# 에이전트 연결 (배포 후)
-claude mcp add --transport http laminate-analyzer <포털베이스>/apps/laminate_analyzer_mcp/mcp
+# 에이전트 연결 (포털 경유 — 인증 토큰 필요)
+claude mcp add --transport http laminate-analyzer \
+  <포털베이스>/apps/laminate_analyzer_mcp/mcp --header "Authorization: Bearer <token>"
 ```
 
 ## 개발

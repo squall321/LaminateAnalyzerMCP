@@ -3,22 +3,26 @@
 > 정본 체크리스트는 [계획서 §13](docs/mcp_laminate_planning.md)에 있다. 여기는 세션 단위 실행 상태 요약.
 > 결정 근거는 [context-notes.md](context-notes.md).
 
-## 2026-07-16 구현 세션 (MVP + hwax 등록)
+## 2026-07-16 세션 2 (완성: V1 + Phase 4/5 + hwax 기동 실증) — 서버 0.2.0
 
 ### 완료
-- [x] Phase 0 — git init, Q1~Q8 기본값 채택 기록
-- [x] Phase 1 — solver 엔진(material/abd/neutral_axis), 폐형해 R1~R5, 성질 P1~P7, 커버리지 98%
-- [x] Phase 2 — MVP Tool 7종, envelope 결정론(P8), 오류코드 유발 테스트(E400/E500 유예), 실프로세스 stdio 스모크
-- [x] Phase 3 — 지표 9종+요약 3항목, W110~W120, 내장 기준 케이스 3종(자가 검증 루프)
-- [x] Phase 6 선행 — streamable HTTP + /health, uvicorn --root-path 스모크(포털 Host 헤더 포함)
-- [x] hwax 등록 — `.portal/manifest.yaml` schema v2 검증 통과, `HEAXHub/integrations/laminate-analyzer-mcp/` 오버레이 배치
-- [x] 상호 등록 — `.mcp.json`에 laminate-analyzer + materialtwin 두 서버 (로컬 stdio)
-- [x] 테스트 75종 전부 통과 (`.venv/bin/pytest`)
 
-### 남은 것 (다음 세션)
-- [ ] HEAXHub 백엔드 재기동 시 카탈로그 등록 확인 (`GET /api/v1/apps?q=laminate`, Bearer 필요) — **사람 액션**
-- [ ] GitHub push (`squall321/LaminateAnalyzerMCP`) 후 manifest source를 git으로 전환 — **사람 액션(gh 인증)**
-- [ ] Phase 4 — sympy 오라클, 문헌 벤치마크 수치 내장, 강건성(512 ply), math_spec.md
-- [ ] Phase 5 잔여 — S5 대화 시나리오 통과 로그, agent_guide.md
-- [ ] §16.6 잔여 검증 — 포털 2단 프록시 통과(SSE) 실측, cae00 오프라인 배송
-- [ ] V1 — solve_load_response(E400 실트리거), 타임아웃(E500), 민감도, 리포트, batch
+- [x] V1 Tool 4종 — solve_load_response(ε0/κ·유효상수·누출/비틀림/주강성방향·비강성), run_sensitivity_analysis(중앙차분), batch_evaluate_laminates(≤32), generate_design_report(ko/en)
+- [x] E400(특이계)·E500(타임아웃) 실트리거 + dominant_coupling_terms 지표
+- [x] Phase 4 — sympy 독립 오라클(T·Reuter 변환행렬 경로) 50케이스 rtol 1e-9 대조, 강건성(512 ply·극단 물성·초박층·각도 경계), math_spec.md
+- [x] Phase 5 — agent_guide.md, S5 시나리오 로그(두 MCP 실 stdio 세션: materialtwin 실측 E 200 GPa → 단위 브리지 → 하이브리드 적층 분석 → W110 복구 → 리포트)
+- [x] hwax 등록 실증 — integrations 심볼릭 링크(in-tree) 전환 → 스캐너 실행(기동 동일 코드 경로) → 카탈로그 v0.2.0 · 빌드 6.1s · 서비스 기동(9117, /health 200) · Caddy 라우트 등록
+- [x] Caddy 라우트 구조 실측 — forward_auth(/api/v1/authz) → strip → proxy. 익명 401은 팀 공개 앱의 정상 게이트
+- [x] 테스트 103종 전부 통과
+
+### 남은 것
+
+- [ ] 포털 경유 MCP 접속 마무리 — **사람 액션**: 포털 인증 토큰으로 `claude mcp add --transport http ... --header "Authorization: Bearer <token>"` 후 SSE·Mcp-Session-Id 통과 확인 (§16.6 항목 2·4)
+- [ ] GitHub push (`squall321/LaminateAnalyzerMCP`) — **사람 액션(gh 인증)**. push 후 manifest source의 git 전환은 선택(현 심볼릭 링크 방식으로 운영 가능)
+- [ ] P4 잔여 — 문헌 벤치마크 공표값 대조 1건
+- [ ] cae00 오프라인 배송 방식에 포함 (§16.6 항목 5)
+- [ ] V2 — 열/흡습(CTE·ΔT, warpage), 층별 응력 복원, 파손 판정(Tsai-Wu 등)
+
+## 2026-07-16 세션 1 (MVP + hwax 등록 준비) — 서버 0.1.0
+
+- [x] Phase 0~3 + HTTP transport 선행 + .mcp.json 상호 등록 + manifest schema v2 검증 (상세는 git 로그와 계획서 §13)

@@ -95,3 +95,26 @@ digital thread(materialtwin:material/1/test/1 → ply source.ref → payload_has
 E400은 solve_load_response의 특이계 경로(영행렬 직접 테스트 + 파이프라인 monkeypatch),
 E500은 batch/sensitivity 루프의 시간 예산(config.COMPUTE_TIMEOUT_S) 집행으로 유발 테스트가 생겼다.
 v2.4(d)의 유예가 해소됐고, 문헌 벤치마크 1건만 P4 잔여로 남는다.
+
+## 2026-07-16 PAT 세션 (정식 인증 경로)
+
+**HEAXHub에 PAT를 정식 구현한 이유와 설계.**
+authz는 쿠키 세션(브라우저 SSO 승계)과 Bearer JWT(TTL 1h)만 받아 헤드리스 MCP 클라이언트가
+설 자리가 없었다. GitHub 스타일 PAT를 추가: `heax_pat_` 프리픽스 + sha256 해시만 저장(평문 1회 노출),
+만료(무기한 허용)·폐기·last_used(60s 스로틀 — authz가 /apps/* 요청마다 불리므로 쓰기 증폭 방지)·audit.
+검증 단일 소스는 pat_service.resolve_user이고 deps.get_current_user와 authz._user_from_request가
+프리픽스로 분기한다. 커밋 6221405(기능)·2b72d0c(laminate 통합 등록).
+
+**라이브 반영 절차 기록.**
+테이블은 테스트 모듈의 멱등 create_all이 라이브 PG에 생성(그들의 테스트는 실 PG 사용).
+백엔드는 기존 기동 방식 그대로 재기동(`bash -c 'set -a; source .env; set +a; cd backend && uvicorn ...'`
+nohup, 로그 var/logs/backend.log). 재기동 시 integrations reconcile이 앱들을 자동 복구했다
+(materialtwin_web이 9118로 재기동 — 슬러그 주소라 클라이언트 영향 없음, 포트 불변 가정 금지 재확인).
+
+**E2E 증거 (§16.6 2·3·4 완결).**
+Bearer PAT로 Caddy(:4180) 경유 — /health 200, 익명 401 유지, initialize 200+SSE+Mcp-Session-Id,
+동일 세션 notifications/initialized 202, tools/list가 Tool 11종 반환. E2E PAT는 admin 소유
+"laminate-mcp-e2e"(365d) — scratchpad에 1회 출력, 필요 시 DELETE /api/v1/auth/tokens/{id}로 폐기.
+
+**참고.** HEAXHub 작업 트리에 병행 작업으로 보이는 미커밋 `backend/app/api/v1/mcp.py`(untracked)와
+`router.py` 수정이 있었다 — 내 커밋에는 포함하지 않음(명시적 파일 목록으로 커밋).

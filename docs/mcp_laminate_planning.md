@@ -768,13 +768,14 @@ call get_reference_cases for worked examples.
 - materialtwin MCP는 현재 stdio 전용이나 FastMCP transport 전환은 소규모(런 모드 인자 추가 수준) — MaterialTwinWeb 백로그(§16.4)에 병기.
 - 서버끼리는 여전히 직접 통신하지 않으므로(§16.3 원칙), "상호 발견"은 결국 **에이전트가 두 슬러그를 아는 것**으로 축소된다. 정적(슬러그 관례 고정)이 기본, 동적(`GET /apps` 질의)은 선택.
 
-**배포 전 검증 항목 (2026-07-16 실측 갱신 — 잔여는 Phase 6 DoD)**
+**배포 전 검증 항목 (2026-07-16 PAT E2E로 완결 — 잔여 1건)**
 1. ~~DNS rebinding Host 검증~~ ✅ 해소 — 포털 Host로 421 나던 것을 loopback 바인드+프록시 경계 전제로 비활성화, 포털 도메인 Host 헤더로 200/SSE 실증
-2. HEAXHub Caddy 1단 실측 ✅ — 라우트 구조는 `forward_auth(GET /api/v1/authz) → strip_path_prefix → reverse_proxy 127.0.0.1:<port>`. 라우팅·strip 동작 확인. **SSE의 Caddy 통과는 인증 토큰 확보 후 마무리** (앱 직결로는 SSE 정상 실증)
-3. 포털 인증 실측 ✅ — visibility: team 앱은 authz 게이트가 익명 요청을 401로 차단(설계 의도). MCP 클라이언트는 `claude mcp add --transport http ... --header "Authorization: Bearer <token>"` 형태로 포털 인증을 함께 보내야 함
-4. `Mcp-Session-Id` 헤더의 프록시 통과 — 토큰 확보 후 2번과 함께 확인
-5. cae00 오프라인 배포 제약(사전 빌드 산출물 배송 방식)에 MCP 서버 포함 — 미착수
+2. ✅ **SSE의 Caddy 통과 실증** — Bearer PAT로 `:4180/apps/laminate_analyzer_mcp/mcp` initialize 호출 → 200 + `text/event-stream` 스트림 정상 수신
+3. ✅ **포털 인증 완결** — HEAXHub에 PAT 기능을 정식 구현(commit 6221405: `POST/GET/DELETE /api/v1/auth/tokens`, sha256 해시 저장, 폐기·만료·audit). authz/deps가 `heax_pat_` 프리픽스로 분기. 익명 401 유지 확인. 접속: `claude mcp add --transport http laminate-analyzer <포털베이스>/apps/laminate_analyzer_mcp/mcp --header "Authorization: Bearer <PAT>"`
+4. ✅ **`Mcp-Session-Id` 프록시 통과 실증** — initialize 응답 헤더 수신 → 동일 세션으로 notifications/initialized(202)·tools/list(Tool 11종 반환)까지 세션 지속 확인
+5. cae00 오프라인 배포 제약(사전 빌드 산출물 배송 방식)에 MCP 서버 포함 — 미착수 (유일 잔여)
 6. HEAXHub에 MCP 전용 스택 정의가 없음 — **fastapi 스택으로 등록·빌드·기동까지 실증 완료**, 전용 스택은 불필요로 판명
+비고. 상위 HWAX 포털(hwax.sec.samsung.net) 1단이 추가된 운영 환경(cae00)에서는 5번 배송과 함께 재확인한다 — websocket 통과 실적상 리스크 낮음.
 
 ---
 

@@ -17,10 +17,11 @@
 
 ### 남은 것
 
-- [ ] 포털 경유 MCP 접속 마무리 — **사람 액션**: 포털 인증 토큰으로 `claude mcp add --transport http ... --header "Authorization: Bearer <token>"` 후 SSE·Mcp-Session-Id 통과 확인 (§16.6 항목 2·4)
-- [ ] GitHub push (`squall321/LaminateAnalyzerMCP`) — **사람 액션(gh 인증)**. push 후 manifest source의 git 전환은 선택(현 심볼릭 링크 방식으로 운영 가능)
+- [x] ~~포털 경유 MCP 접속 마무리~~ — **HEAXHub에 PAT 기능 정식 구현으로 완결** (commit 6221405). Bearer PAT로 Caddy 경유 initialize→tools/list SSE 세션 관통 실증 (§16.6 항목 2·3·4 완료). E2E용 PAT(`laminate-mcp-e2e`, admin, 365d)는 scratchpad `pat.txt`에 1회 출력됨 — 개인 토큰은 `POST /api/v1/auth/tokens`로 직접 발급, 폐기는 `DELETE /api/v1/auth/tokens/{id}`
+- [ ] GitHub push (`squall321/LaminateAnalyzerMCP` + HEAXHub PAT 커밋 2건) — **사람 액션(gh 인증)**
 - [ ] P4 잔여 — 문헌 벤치마크 공표값 대조 1건
-- [ ] cae00 오프라인 배송 방식에 포함 (§16.6 항목 5)
+- [ ] cae00 오프라인 배송 방식에 포함 (§16.6 항목 5, 유일 잔여 검증)
+- [ ] (선택) HEAXHub 프론트에 PAT 관리 UI (현재는 API 발급)
 - [ ] V2 — 열/흡습(CTE·ΔT, warpage), 층별 응력 복원, 파손 판정(Tsai-Wu 등)
 
 ## 2026-07-16 세션 1 (MVP + hwax 등록 준비) — 서버 0.1.0

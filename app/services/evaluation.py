@@ -80,6 +80,19 @@ def compute_indices(A_hat: np.ndarray, B_hat: np.ndarray, D_hat: np.ndarray,
     idx["abd_condition_number"] = _index(cond, None, "cond_2(K_hat), K_hat = 합동변환 정규화 6x6 (§4.6)")
 
     idx["positive_definite"] = _index(bool(positive_definite), None, "Cholesky(K_hat) 성공 여부")
+
+    # 지배 커플링 항 (계획서 §5.2 dominant_coupling_terms) — 커플링이 유의할 때만
+    terms = []
+    if nB > 1e-9 * nA:
+        names = {(0, 0): "B11", (0, 1): "B12", (0, 2): "B16", (1, 1): "B22", (1, 2): "B26", (2, 2): "B66"}
+        for (i, j), nm in names.items():
+            frac = abs(B_hat[i, j]) / nB
+            if frac >= 0.05:
+                terms.append({"term": nm, "fraction_of_norm": float(frac),
+                              "sign": int(np.sign(B_hat[i, j]))})
+        terms.sort(key=lambda x: -x["fraction_of_norm"])
+    idx["dominant_coupling_terms"] = {"value": terms[:3],
+                                      "definition": "|B_hat_ij|/||B_hat||_F 상위 항 (비대칭 원인 진단용, 대칭이면 빈 목록)"}
     return idx
 
 

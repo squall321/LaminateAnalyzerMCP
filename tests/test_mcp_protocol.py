@@ -10,7 +10,10 @@ from app.mcp_server import mcp
 
 EXPECTED_TOOLS = {"analyze_laminate", "validate_laminate_input", "compute_abd_matrix",
                   "compute_neutral_axis", "evaluate_laminate", "get_reference_cases",
-                  "get_server_info"}
+                  "get_server_info",
+                  # V1
+                  "solve_load_response", "run_sensitivity_analysis",
+                  "batch_evaluate_laminates", "generate_design_report"}
 
 
 def test_tools_and_resources_exposed():

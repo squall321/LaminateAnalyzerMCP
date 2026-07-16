@@ -4,13 +4,15 @@ SUPPORTED_UNIT_SYSTEMS = ("SI", "SI_mm")
 
 # 입력 → SI 변환 계수
 TO_SI = {
-    "SI": {"modulus": 1.0, "length": 1.0, "density": 1.0},
-    "SI_mm": {"modulus": 1.0e6, "length": 1.0e-3, "density": 1.0e12},  # MPa→Pa, mm→m, t/mm³→kg/m³
+    "SI": {"modulus": 1.0, "length": 1.0, "density": 1.0, "load_n": 1.0, "load_m": 1.0},
+    # MPa→Pa, mm→m, t/mm³→kg/m³, N/mm→N/m, M은 N·mm/mm = N·m/m 수치 동일
+    "SI_mm": {"modulus": 1.0e6, "length": 1.0e-3, "density": 1.0e12, "load_n": 1.0e3, "load_m": 1.0},
 }
 
 # SI 결과 → 입력 단위계 표시 변환 계수
 FROM_SI = {
-    "SI": {"A": 1.0, "B": 1.0, "D": 1.0, "z": 1.0, "hat": 1.0, "areal_mass": 1.0, "modulus": 1.0},
+    "SI": {"A": 1.0, "B": 1.0, "D": 1.0, "z": 1.0, "hat": 1.0, "areal_mass": 1.0,
+           "modulus": 1.0, "kappa": 1.0},
     "SI_mm": {
         "A": 1.0e-3,          # N/m → N/mm
         "B": 1.0,             # N → N (동일 차원)
@@ -19,6 +21,7 @@ FROM_SI = {
         "hat": 1.0e-6,        # Pa → MPa
         "areal_mass": 1.0e-9, # kg/m² → t/mm²
         "modulus": 1.0e-6,    # Pa → MPa
+        "kappa": 1.0e-3,      # 1/m → 1/mm
     },
 }
 

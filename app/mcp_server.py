@@ -94,6 +94,58 @@ def evaluate_laminate(laminate: dict, criteria: dict | None = None) -> dict:
 
 
 @mcp.tool()
+def solve_load_response(laminate: dict, loads: dict,
+                        scan_principal_direction: bool = True) -> dict:
+    """단위 폭당 하중 N/M에 대한 응답 ε0·κ와 유효 공학 상수, V1 지표를 계산한다.
+
+    loads = {"N": [Nx, Ny, Nxy], "M": [Mx, My, Mxy]} — N은 SI: N/m | SI_mm: N/mm,
+    M은 두 단위계 모두 N (단위 폭당 모멘트). 생략된 벡터는 0.
+    반환: response(ε0, κ), effective_constants(막 Ex/Ey/Gxy/ν_xy, 굽힘 Ex_b/Ey_b),
+    v1_indices(membrane_bending_leakage, twist_under_bending, 주강성 방향 스캔, 비강성).
+    """
+    return _guarded(PIPE.run_load_response, laminate, loads=loads,
+                    scan_principal_direction=scan_principal_direction)
+
+
+@mcp.tool()
+def run_sensitivity_analysis(laminate: dict, angle_delta_deg: float = 1.0,
+                             thickness_rel: float = 0.01, modulus_rel: float = 0.01) -> dict:
+    """ply별 각도/두께/탄성계수 섭동에 대한 D̂11·coupling_ratio·ζ_x의 민감도(중앙차분).
+
+    제조 공차 강건성 판단용. 결정론적이며 에이전트가 2×3×n_plies회 반복 호출할 것을 1회로 줄인다.
+    ply 수가 많으면 계산 시간 예산(10s) 초과 시 E500을 반환한다.
+    """
+    return _guarded(PIPE.run_sensitivity, laminate, angle_delta_deg=angle_delta_deg,
+                    thickness_rel=thickness_rel, modulus_rel=modulus_rel)
+
+
+@mcp.tool()
+def batch_evaluate_laminates(laminates: list[dict], criteria: dict | None = None) -> dict:
+    """최대 32개 적층안을 일괄 평가해 케이스당 핵심 지표 요약을 반환한다.
+
+    에이전트 주도 설계 탐색 루프(후보 생성 → 일괄 평가 → 선별)의 가속용.
+    criteria를 주면 케이스별 pass_all이 함께 반환된다. 상세가 필요한 후보만
+    analyze_laminate로 재조회할 것.
+    """
+    try:
+        return PIPE.run_batch(laminates, criteria=criteria)
+    except Exception as e:  # noqa: BLE001
+        return ENV.build(data=None, errors=[item("E501", detail=type(e).__name__)],
+                         warnings=[], payload={"laminates": laminates if isinstance(laminates, list) else []})
+
+
+@mcp.tool()
+def generate_design_report(laminate: dict, criteria: dict | None = None,
+                           language: str = "ko") -> dict:
+    """사람용 Markdown 리포트(report_markdown)와 LLM용 요약(summary)을 생성한다.
+
+    language: "ko"(기본) | "en". 리포트에는 입력·ABD·중립면·지표·권고·경고·가정이
+    payload_hash와 함께 담겨 재현 가능한 보고 자료가 된다.
+    """
+    return _guarded(PIPE.run_report, laminate, criteria=criteria, language=language)
+
+
+@mcp.tool()
 def get_reference_cases(case_id: str | None = None) -> dict:
     """내장 기준 케이스를 반환한다. case_id 생략 시 목록.
 
@@ -142,6 +194,10 @@ def guide() -> str:
 2) 분석: analyze_laminate(laminate) 원샷 — 요약·ABD·중립면·지표·권고 반환.
 3) 기준 판정: evaluate_laminate(laminate, criteria={"max_coupling_ratio": 0.05, ...}).
 4) 단계별: validate_laminate_input → compute_abd_matrix → compute_neutral_axis.
+5) 하중 응답: solve_load_response(laminate, loads={"N":[Nx,Ny,Nxy],"M":[Mx,My,Mxy]})
+   — ε0/κ, 유효 공학 상수, 누출/비틀림 지표, 주강성 방향.
+6) 설계 탐색 가속: 후보 여러 개를 batch_evaluate_laminates로 일괄 평가 → 유망 후보만 상세 분석.
+7) 공차 강건성: run_sensitivity_analysis. 최종 보고: generate_design_report(ko|en).
 
 ## materialtwin 연계 (물성을 모를 때)
 - materialtwin MCP의 list_materials/search_by_property → get_material에서 실측 E를 얻는다.

@@ -1,7 +1,7 @@
 schema_version: 2
 id: laminate_analyzer_mcp
 name: Laminate Analyzer MCP
-version: 0.2.0
+version: 0.2.1
 owner: cae-automation
 status: beta
 app_type: web_app
@@ -65,3 +65,10 @@ source:
   type: local_path
   path: /home/koopark/claude/LaminateAnalyzerMCP
   sync: symlink
+
+# HWAX MCP Gateway 자동탐지 opt-in — HEAXHub /api/v1/mcp/servers 레지스트리에 노출되어
+# 중앙 게이트웨이(:9110)가 이 앱의 MCP를 자동 흡수한다 (HEAX 서비스 PAT 중앙 주입).
+mcp:
+  expose: true
+  path: /mcp
+  transport: streamable_http

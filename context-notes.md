@@ -118,3 +118,24 @@ Bearer PAT로 Caddy(:4180) 경유 — /health 200, 익명 401 유지, initialize
 
 **참고.** HEAXHub 작업 트리에 병행 작업으로 보이는 미커밋 `backend/app/api/v1/mcp.py`(untracked)와
 `router.py` 수정이 있었다 — 내 커밋에는 포함하지 않음(명시적 파일 목록으로 커밋).
+
+## 2026-07-16 게이트웨이 자동탐지 세션
+
+**"포털 최상단 자동화"의 실체 — 이미 구축돼 있었고, 앱 쪽 opt-in만 비어 있었다.**
+HWAXMcpGateway(:9110)에 heax_registry 자동탐지가 가동 중: HEAXHub `/api/v1/mcp/servers`
+(병행 작업의 미커밋 mcp.py)를 60초마다 폴링해, manifest에 `mcp.expose: true`를 선언한
+published 앱을 백엔드로 자동 합류시키고 **HEAX 서비스 PAT를 중앙 주입**해 Caddy authz를
+통과한다(오늘 구현한 PAT가 이 용도로 이미 config에 들어가 있었음). 우리 manifest에 mcp
+블록이 없어 레지스트리가 빈 목록이었고, opt-in 추가(0.2.1)+재스캔 후 60초 내
+`heax-laminate_analyzer_mcp` 합류(도구 118→129), 게이트웨이 경유 analyze 실호출 ok.
+
+**토큰 3층 구분 (혼동 주의).**
+① HWAXPortal PAT(`POST /auth/pat`, RS256+JWKS) — rest_proxy `/api/<site>/*`용.
+② GW_TOKEN — MCP 게이트웨이(:9110/mcp) 인바운드 인증, 에이전트 설정에 이것 하나만.
+③ HEAXHub PAT(`heax_pat_`, 오늘 구현) — 게이트웨이→HEAX 앱 구간에 중앙 주입(클라이언트 무관).
+
+**materialtwin 주의.** materialtwin MCP는 stdio 전용이라 레지스트리 opt-in 불가.
+HTTP transport 추가(§16.4 백로그) 시 같은 manifest 블록으로 자동 합류 가능.
+
+**manifest 스키마 v2에는 mcp 블록이 없다(additionalProperties: false 위반).**
+스캐너가 스키마를 강제하지 않아 동작하지만, 병행 작업 정리 시 schema v2에 mcp 블록 추가 권장.

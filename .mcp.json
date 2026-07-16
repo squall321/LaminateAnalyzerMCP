@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "laminate-analyzer": {
+      "command": "/home/koopark/claude/LaminateAnalyzerMCP/.venv/bin/laminate-mcp",
+      "args": ["--transport", "stdio"]
+    },
+    "materialtwin": {
+      "command": "/home/koopark/claude/MaterialTwinWeb/backend/.venv/bin/python",
+      "args": ["/home/koopark/claude/MaterialTwinWeb/backend/mcp_server.py"],
+      "env": {
+        "MATERIALTWIN_DATA_DIR": "/home/koopark/claude/MaterialTwinWeb/backend/var/data",
+        "MATERIALTWIN_DATABASE_URL": "sqlite:////home/koopark/claude/MaterialTwinWeb/backend/var/data/materialtwin.db"
+      }
+    }
+  }
+}

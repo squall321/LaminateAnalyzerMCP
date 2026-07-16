@@ -2,7 +2,7 @@
 
 | 항목 | 내용 |
 |---|---|
-| 문서 버전 | v2.3 (원안 v1.0을 검증·확장, §16 materialtwin 실측 반영 + §16.6 hwax portal 주소 체계) |
+| 문서 버전 | v2.4 (v2.3 + 구현 세션 반영 — MVP 완료, hwax 등록, D10 개정) |
 | 작성일 | 2026-07-16 |
 | 상태 | 구현 착수 가능 (미결 사항은 §15에 기본값과 함께 명시) |
 | 대상 독자 | **이 계획서를 읽고 그대로 구현하는 코딩 에이전트**, 그리고 검토자(사람) |
@@ -79,7 +79,7 @@
 | D7 | 상태 관리 | **완전 무상태(stateless)**. 세션·캐시·서버측 저장 없음. 모든 Tool은 완결된 payload를 받아 완결된 응답을 반환 |
 | D8 | 결정론 | 기본 응답은 바이트 단위 결정론적. 시각·소요시간 등 비결정 요소는 `include_debug=true`일 때만 `debug` 블록에 포함 (§6.5) |
 | D9 | 수치 표현 | 내부 float64. 응답 직렬화는 Python `repr` 기반 shortest round-trip(전정밀도). 서버측 반올림 없음 |
-| D10 | 언어 | Tool description, 오류 메시지, suggestion은 **영어** (에이전트 소비 표준). 사람용 리포트(V1 `generate_design_report`)만 한/영 옵션 |
+| D10 | 언어 | ~~영어~~ → **한국어로 개정** (v2.4, Q8 채택). materialtwin이 한국어 오류 관례를 5라운드 적대 리뷰로 확정한 상태라, 같은 생태계에서 함께 쓰는 본 서버도 Tool description·오류·suggestion을 한국어로 정렬 |
 | D11 | 명명 | Tool·필드 snake_case. 서버 이름 `laminate-analyzer`. 문서 용어는 "중립면(neutral surface)"이되 beam 모드 설명에서만 neutral axis 허용 |
 | D12 | 구현 스택 | Python ≥ 3.11, 공식 `mcp` Python SDK(FastMCP), numpy ≥ 1.26, pydantic ≥ 2.7, pytest + hypothesis, sympy(테스트 전용 오라클). scipy 불필요 |
 
@@ -633,30 +633,31 @@ call get_reference_cases for worked examples.
 
 ## 13. 구현 체크리스트
 
-구현 에이전트가 직접 갱신할 것.
+구현 에이전트가 직접 갱신할 것. (2026-07-16 구현 세션 반영 — 상세는 리포지토리 `context-notes.md`)
 
-- [ ] P0. §15 결정 기록, git init, 초기 커밋
-- [ ] P1. material.py (Q, Q̄, S̄, E_x, 물성 검증)
-- [ ] P1. abd.py (z좌표, ABD, K̂ 정규화)
-- [ ] P1. neutral_axis.py (beam_equivalent, clt_weighted)
-- [ ] P1. 폐형해 테스트 R1~R5
-- [ ] P1. 성질 테스트 P1~P7 (hypothesis)
-- [ ] P1. solver 커버리지 ≥ 90%
-- [ ] P2. schemas.py + errors.py + envelope.py
-- [ ] P2. main.py stdio 서버, MVP Tool 7종
-- [ ] P2. 결정론 테스트 P8 + payload_hash
-- [ ] P2. 오류/경고 코드 전수 유발 테스트
-- [ ] P2. MCP Inspector 호출 데모 기록
-- [ ] P3. evaluation.py 지표 12종 + 등급 밴드
-- [ ] P3. W110 단위 휴리스틱
-- [ ] P3. get_reference_cases 내장 케이스 3+
+- [x] P0. §15 결정 기록(Q1~Q8 기본값 채택), git init, 초기 커밋
+- [x] P1. material.py (Q, Q̄, S̄, E_x, 물성 검증)
+- [x] P1. abd.py (z좌표, ABD, K̂ 정규화)
+- [x] P1. neutral_axis.py (beam_equivalent, clt_weighted)
+- [x] P1. 폐형해 테스트 R1~R5
+- [x] P1. 성질 테스트 P1~P7 (hypothesis)
+- [x] P1. solver 커버리지 ≥ 90% (실측 98%, services 포함)
+- [x] P2. schemas.py + errors.py + envelope.py
+- [x] P2. stdio 서버, MVP Tool 7종 (패키지는 `server/` 대신 `app/` — HEAXHub fastapi 스택 정합, 부록 C 14)
+- [x] P2. 결정론 테스트 P8 + payload_hash
+- [x] P2. 오류/경고 코드 유발 테스트 — E400(하중응답 V1)·E500(타임아웃 V1)만 트리거 유예, 카탈로그 전수 테스트로 대체
+- [x] P2. 실프로세스 stdio 왕복 + uvicorn(root-path) 스모크로 Inspector 데모 대체
+- [x] P3. evaluation.py 지표 + 등급 밴드 (9지표 + summary 3항목)
+- [x] P3. W110 단위 휴리스틱 (+W111/W112/W120)
+- [x] P3. get_reference_cases 내장 케이스 3종 (자가 검증 루프 테스트 포함)
 - [ ] P4. sympy 오라클 + 무작위 50케이스 대조
 - [ ] P4. 문헌 벤치마크 수치 확정·내장
 - [ ] P4. 강건성 테스트 (극단 물성, 512 ply)
 - [ ] P4. math_spec.md
-- [ ] P5. agent_guide.md + 서버 instructions
-- [ ] P5. Claude Code 등록 + S5 시나리오 통과 로그
-- [ ] P6. (선택) HTTP transport + 운영 스크립트
+- [x] P5. 서버 instructions + `laminate://guide` 리소스 (agent_guide.md는 P4 이후)
+- [x] P5. `.mcp.json` 상호 등록 (laminate-analyzer + materialtwin) — S5 대화 시나리오 로그는 미실시
+- [x] P6. HTTP transport (streamable HTTP + /health) — hwax 등록 요구로 선행 구현
+- [x] P6+. HEAXHub 등록: `.portal/manifest.yaml`(schema v2 검증 통과) + `integrations/laminate-analyzer-mcp/` 오버레이. 반영은 HEAXHub 백엔드 재기동 시 자동 스캔
 
 ---
 
@@ -681,7 +682,7 @@ call get_reference_cases for worked examples.
 | Q5 | V2 우선순위 (열 warpage vs 파손 판정) | 열 warpage 우선 (원안 4.4의 warpage 지표 의도 복원) |
 | Q6 | materialtwin 소규모 증분(orientation 노출·입력, attributes 쓰기 — §16.4)의 진행 시점 | 본 프로젝트 V1 착수 시점에 MaterialTwinWeb 백로그로 함께 진행 (그 전까지는 시편 label 규약으로 우회) |
 | Q7 | `estimate_ply_properties` (미시역학 추정 Tool) 시점 | V2 (열 warpage와 함께) |
-| Q8 | 오류 메시지 언어 — materialtwin은 한국어 dict 관례 확정, 본 계획 D10은 영어 | **materialtwin 관례(한국어)로 정렬 권장** (같은 사용자 생태계에서 두 서버를 함께 쓰므로). 채택 시 D10 개정 |
+| Q8 | 오류 메시지 언어 — materialtwin은 한국어 dict 관례 확정, 본 계획 D10은 영어 | ✅ **채택 완료(v2.4)** — 한국어로 정렬, D10 개정됨 |
 
 ---
 
@@ -815,3 +816,4 @@ call get_reference_cases for worked examples.
 11. (v2.1) §16 신설 — 지식 축적 3층 구조(무상태 원칙 유지), 재료 해석 체인(강성 미상 시 MaterialTwinWeb 조회→미시역학 추정), MaterialTwinWeb MCP 파사드 제안, Twin 검증 루프. `source` provenance 필드(V1)와 W120 경고 코드 예약.
 12. (v2.2) §16을 **materialtwin MCP 실측 현황 기반으로 재작성** — 파사드 신설 제안 철회(도구 20종 MCP 실존), 실제 도구명·단위(E_GPa)·오류 관례(한국어 dict)·valid 규칙 반영, orientation 미노출·attributes 쓰기 불가 갭을 소규모 증분 백로그로 정리, `.mcp.json` 스코프 이슈 명시, Q6 교체·Q8(오류 언어 정합) 신설.
 13. (v2.3) §16.6 신설 — hwax portal(HEAXHub) 실측 결과 슬러그 기반 주소 체계(`/apps/{slug}/` Caddy 동적 라우트, proxy 모드, `GET /apps` 카탈로그)가 이미 존재함을 확인. 배포 시 IP:port 대신 슬러그 주소 채택, 원안 §10의 포트 스캔 정책은 로컬 HTTP 모드 한정으로 축소. 미실측 검증 5항목을 Phase 6 DoD로 이관.
+14. (v2.4, 구현 세션) MVP 구현 완료를 반영한 개정 — (a) 패키지 레이아웃 `server/` → `app/` (HEAXHub fastapi 스택 기본 entrypoint `app.main:app` 정합, §9의 파일명은 app/ 하위로 읽을 것), (b) D10 언어 규약을 한국어로 개정(Q8 채택), (c) HTTP transport를 Phase 6에서 선행 구현(hwax 등록 요구) — MCP SDK의 DNS rebinding Host 검증은 loopback 바인드+프록시 경계 전제로 비활성화(§16.6 검증 항목 1건 해소), (d) E400·E500은 트리거 경로가 V1 기능(하중응답·타임아웃)에 있어 유발 테스트 유예, (e) StreamableHTTPSessionManager는 프로세스당 1회 기동 제약 확인(운영 영향 없음), (f) HEAXHub 스키마 v2 실검증 결과 — `health_check`/`restart_policy`는 `launch` 하위, `build.type` 필수, `source.ref` 불허 (materialtwin-web 오버레이는 이 세 가지를 위반한 채 스택 기본값으로 동작 중 — 해당 프로젝트에 전달 권장).

@@ -21,7 +21,9 @@
 - [ ] GitHub push (`squall321/LaminateAnalyzerMCP` + HEAXHub PAT 커밋 2건) — **사람 액션(gh 인증)**
 - [ ] P4 잔여 — 문헌 벤치마크 공표값 대조 1건
 - [ ] cae00 오프라인 배송 방식에 포함 (§16.6 항목 5, 유일 잔여 검증)
+- [x] ~~materialtwin HTTP transport~~ — **완료(2026-07-16 밤, 병행 협업)**: 웹앱 /mcp 마운트(SIF v1.1.0, bare-path 수정), 삭제 툴 HTTP 비노출, manifest opt-in → 게이트웨이 자동 합류(도구 147). 게이트웨이 한 세션에서 재료 실측 E→적층 해석 체인 실증(W120 추적, Â11=E/(1-ν²) 일치)
 - [ ] (선택) HEAXHub 프론트에 PAT 관리 UI (현재는 API 발급)
+- [ ] materialtwin 잔여 갭 — register_tensile_test orientation 입력 파라미터, update_material attributes 쓰기 (조회 노출은 완료)
 - [ ] V2 — 열/흡습(CTE·ΔT, warpage), 층별 응력 복원, 파손 판정(Tsai-Wu 등)
 
 ## 2026-07-16 세션 1 (MVP + hwax 등록 준비) — 서버 0.1.0

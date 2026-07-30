@@ -81,3 +81,21 @@ claude mcp add --transport http laminate-analyzer \
 ```
 
 같은 방식으로 materialtwin도 슬러그 주소로 접속 가능해지면 두 서버 모두 IP 없이 연결된다.
+
+## 7. 열 휨(PCB warpage)과 크랙 차폐 워크플로 (v0.3.0)
+
+**PCB 리플로우 휨 경향** — 동박률이 층마다 다른 기판.
+
+1. 각 동박층: `homogenize_layer([{Cu(E=110000, ν=0.34, α=17e-6), f=동박률}, {수지(E=3500, ν=0.35, α=60e-6), f=1−동박률}])`
+2. 유전체 층은 α 포함 물성으로 직접 입력 → laminae 구성 (비대칭 동박 분포가 휨의 원인)
+3. `compute_thermal_response(laminate, delta_T=+235(리플로우) 또는 −(경화 냉각), panel={"Lx":100,"Ly":60})`
+   → `warpage.range`(coplanarity), `effective_cte`, ply 잔류응력. Tg 이상 α 급변은 미반영(가정 명시됨)
+4. 경향 탐색: 동박률·두께를 바꿔가며 재호출 — 결정론이라 비교가 곧 감도
+
+**크랙 차폐(보호층/피보호층)** — 예: PSA/UTG유리/PSA.
+
+1. 보호층 material에 `viscoelastic: {E0, Einf, tau_s}` (materialtwin 완화시험 값 그대로)
+2. `assess_crack_shielding(laminate, target_ply=유리, fracture={"applied_strain":..., "gamma_target":..., "gamma_interface":..., "gamma_next_layer":...})`
+3. 해석 요령: `initiation_threshold.sigma_critical`(박층일수록↑ — h 절반이면 ×√2),
+   Dundurs α>0이면 유연 이웃이라 개구 증폭 경향, `interface_deflection`(Γi/Γℓ<0.25 → 계면에서 저지),
+   `viscoelastic.transfer_length_growth`(이완 후 구속 저하 √(E0/E∞)) — 시간·고온에서 차폐가 얼마나 풀리는지

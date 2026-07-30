@@ -27,6 +27,16 @@
 - [ ] materialtwin 잔여 갭 — register_tensile_test orientation 입력 파라미터, update_material attributes 쓰기 (조회 노출은 완료)
 - [ ] V2 — 열/흡습(CTE·ΔT, warpage), 층별 응력 복원, 파손 판정(Tsai-Wu 등)
 
+## 2026-07-30 세션 (V2-1차: 열 휨 + 크랙 차폐, 서버 0.3.0)
+
+- [x] 열탄성: CTE 스키마(α/α1·α2, ppm 착오 W110) + compute_thermal_response(유효 CTE·열곡률·잔류응력·판 휨) + E203
+- [x] 동박률 균질화: homogenize_layer (Voigt, α는 강성 가중)
+- [x] 크랙 차폐: assess_crack_shielding (터널 G_ss·σ_c·Dundurs·He-Hutchinson 1/4·shear-lag·점탄성 이완) + material.viscoelastic
+- [x] 검증: Timoshenko 바이메탈 rel 1e-6, 평형 불변식, Griffith 항등, 단위 브리지 — 테스트 122종 전부 통과
+- [x] mcp<2 핀 (2.0이 FastMCP 제거 — materialtwin과 동일 결정), venv 재생성
+- [ ] **라이브 반영 = GitHub push (사람 액션)** — 배포가 git source(SIF)로 전환되어 push 후 스캐너 자동 재빌드·게이트웨이 반영
+- [ ] 다음 물리 확장: 층별 기계 응력 복원·파손 판정(materialtwin 강도 데이터 연동), 좌굴, check_design_rules
+
 ## 2026-07-16 세션 1 (MVP + hwax 등록 준비) — 서버 0.1.0
 
 - [x] Phase 0~3 + HTTP transport 선행 + .mcp.json 상호 등록 + manifest schema v2 검증 (상세는 git 로그와 계획서 §13)

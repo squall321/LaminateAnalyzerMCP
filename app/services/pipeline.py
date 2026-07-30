@@ -481,3 +481,253 @@ def run_report(payload, criteria: dict | None = None, language: str = "ko",
                      unit_system=env["metadata"]["unit_system_in"],
                      assumptions_extra=[a for a in env["assumptions"] if a not in ENV.BASE_ASSUMPTIONS],
                      include_debug=include_debug, t0=t0)
+
+
+# ── V2-1차: 열탄성 휨 / 균질화 / 크랙 차폐 (계획서 §17) ─────────────────────
+
+
+def _cte_vectors_or_error(si) -> tuple[list | None, list[dict]]:
+    """전 ply CTE 확보 검사 → [αx,αy,αxy] 목록 또는 E203."""
+    from app.solver import thermal as TH
+    missing = [k for k, p in enumerate(si.plies) if not p.has_cte]
+    if missing:
+        return None, [item("E203", field="laminae",
+                           detail=f"laminae{missing} 에 CTE가 없습니다")]
+    return [TH.alpha_vector(p.alpha1, p.alpha2, p.angle_deg) for p in si.plies], []
+
+
+def run_thermal(payload, delta_t, panel=None, include_debug: bool = False) -> dict:
+    """자유 열변형: 유효 CTE·열곡률·ply 잔류응력·판 휨 (compute_thermal_response Tool, §17.1)."""
+    from app.solver import thermal as TH
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    if not isinstance(delta_t, (int, float)) or isinstance(delta_t, bool) or delta_t == 0:
+        return ENV.build(data=None, errors=[item("E100", field="delta_T",
+                                                 detail="delta_T는 0이 아닌 숫자 [K]여야 합니다 (T_현재 − T_무응력기준)")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    if panel is not None:
+        if not (isinstance(panel, dict)
+                and all(isinstance(panel.get(k), (int, float)) and not isinstance(panel.get(k), bool)
+                        and panel.get(k) > 0 for k in ("Lx", "Ly"))):
+            return ENV.build(data=None, errors=[item("E100", field="panel",
+                                                     detail="panel은 {\"Lx\": >0, \"Ly\": >0} (길이 단위) 여야 합니다")],
+                             warnings=warnings, payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+
+    alphas, cte_err = _cte_vectors_or_error(si)
+    if cte_err:
+        return ENV.build(data=None, errors=cte_err, warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    A, B, D, z, h = _abd_of_plies(si.plies)
+    qbars = [MAT.qbar_matrix(MAT.q_matrix(p.E1, p.E2, p.G12, p.nu12), p.angle_deg) for p in si.plies]
+    N_th, M_th = TH.thermal_loads(qbars, alphas, z, float(delta_t))
+    try:
+        eps0, kappa = TH.thermal_response(A, B, D, N_th, M_th)
+    except RESP.SingularSystemError:
+        return ENV.build(data=None, errors=[item("E400", field="laminate")], warnings=warnings,
+                         payload=payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    f = units.FROM_SI[si.unit_system]
+    sig = TH.residual_ply_stresses(qbars, alphas, z, eps0, kappa, float(delta_t))
+    per_ply = [{"ply": k, "sigma_xyz": (s * f["modulus"]).tolist()} for k, s in enumerate(sig)]
+    worst = max(range(len(sig)), key=lambda k: float(np.max(np.abs(sig[k]))))
+
+    data: dict = {
+        "effective_cte": {
+            "alpha_x": float(eps0[0] / delta_t), "alpha_y": float(eps0[1] / delta_t),
+            "alpha_xy": float(eps0[2] / delta_t),
+            "definition": "자유 열변형 막변형률/ΔT [1/K] (비대칭이면 곡률 커플링 포함 유효값)",
+        },
+        "response": {
+            "delta_T": float(delta_t),
+            "epsilon0": eps0.tolist(),
+            "kappa": (kappa * f["kappa"]).tolist(),
+            "kappa_per_K": (kappa * f["kappa"] / delta_t).tolist(),
+        },
+        "residual_stress": {
+            "note": "ply 중앙면 값 σ = Q̄(ε0+z̄κ−αΔT). 힘 평형(Σσt=0)은 엔진 불변식",
+            "per_ply": per_ply,
+            "max_abs": {"ply": worst, "value": float(np.max(np.abs(sig[worst])) * f["modulus"])},
+        },
+    }
+    if panel is not None:
+        lx_si = panel["Lx"] * units.TO_SI[si.unit_system]["length"]
+        ly_si = panel["Ly"] * units.TO_SI[si.unit_system]["length"]
+        wp = TH.warpage_over_panel(kappa, lx_si, ly_si)
+        data["warpage"] = {
+            "panel": {"Lx": panel["Lx"], "Ly": panel["Ly"]},
+            "range": wp["warpage_range"] * f["z"],
+            "definition": "w(x,y)=−½(κx x²+κy y²+κxy xy)의 판 위 최대−최소 (coplanarity). 9점 평가",
+        }
+
+    extra = [
+        "열해석 가정: 선형 CTE(온도 무관 — FR-4 등은 Tg 이상에서 α 급변, 미반영)",
+        "delta_T = T_현재 − T_무응력기준(경화/리플로우 기준온도), 자유 경계·소변형",
+        *_source_assumptions(si),
+    ]
+    hash_payload = {"laminate": payload, "delta_T": delta_t, "panel": panel}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warnings,
+                         payload=hash_payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warnings, payload=hash_payload,
+                     unit_system=si.unit_system, assumptions_extra=extra,
+                     include_debug=include_debug, t0=t0)
+
+
+def run_homogenize(components, include_debug: bool = False) -> dict:
+    """면내 병렬(Voigt) 층 균질화 — 동박률 등가 물성 (homogenize_layer Tool, §17.1).
+
+    단위계 무관: 출력 E/α/ρ 단위는 입력과 동일하다.
+    """
+    from app.solver import thermal as TH
+    t0 = time.perf_counter()
+    err = None
+    parsed = []
+    if not isinstance(components, list) or len(components) < 2:
+        err = item("E100", field="components",
+                   detail="components는 2개 이상 {material(isotropic), volume_fraction} 목록이어야 합니다")
+    else:
+        for i, c in enumerate(components):
+            m = c.get("material") if isinstance(c, dict) else None
+            fvol = c.get("volume_fraction") if isinstance(c, dict) else None
+            ok = (isinstance(m, dict) and m.get("type") == "isotropic"
+                  and isinstance(m.get("E"), (int, float)) and m.get("E") > 0
+                  and isinstance(m.get("nu"), (int, float))
+                  and isinstance(fvol, (int, float)) and not isinstance(fvol, bool) and 0 < fvol <= 1)
+            if not ok:
+                err = item("E100", field=f"components[{i}]",
+                           detail=f"components[{i}]는 {{material: {{type:'isotropic', E>0, nu}}, volume_fraction∈(0,1]}} 이어야 합니다")
+                break
+            parsed.append((float(fvol), float(m["E"]), float(m["nu"]),
+                           float(m["alpha"]) if isinstance(m.get("alpha"), (int, float)) else None,
+                           float(m["rho"]) if isinstance(m.get("rho"), (int, float)) else None))
+    if err is None and abs(sum(p[0] for p in parsed) - 1.0) > 1e-6:
+        err = item("E100", field="components",
+                   detail=f"volume_fraction 합이 1이어야 합니다 (현재 {sum(p[0] for p in parsed):.6f})")
+    if err is not None:
+        return ENV.build(data=None, errors=[err], warnings=[], payload={"components": components},
+                         include_debug=include_debug, t0=t0)
+
+    hom = TH.homogenize_voigt(parsed)
+    material = {"type": "isotropic", "E": hom["E"], "nu": hom["nu"]}
+    if hom["alpha"] is not None:
+        material["alpha"] = hom["alpha"]
+    if hom["rho"] is not None:
+        material["rho"] = hom["rho"]
+    data = {
+        "material": material,
+        "model": "voigt_in_plane",
+        "definition": "E=Σf·E, ν=Σf·ν, α=Σf·E·α/Σf·E (힘 평형 가중), ρ=Σf·ρ",
+        "note": "면내 병렬(Voigt) 상한 모델 — 동박층 = {Cu f=동박률, 수지 f=1−동박률}. 단위는 입력 그대로",
+    }
+    return ENV.build(data=data, errors=[], warnings=[], payload={"components": components},
+                     assumptions_extra=["균질화: Voigt(등변형) 상한 — 면내 강성·CTE 1차 근사"],
+                     include_debug=include_debug, t0=t0)
+
+
+def run_crack_assessment(payload, target_ply, fracture=None, include_debug: bool = False) -> dict:
+    """피보호층 크랙 발생·차폐 평가 (assess_crack_shielding Tool, §17.2)."""
+    from app.solver import fracture as FR
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    n = len(si.plies)
+    if not isinstance(target_ply, int) or isinstance(target_ply, bool) or not (0 <= target_ply < n):
+        return ENV.build(data=None, errors=[item("E100", field="target_ply",
+                                                 detail=f"target_ply는 0..{n-1} 정수여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    fr = fracture if isinstance(fracture, dict) else {}
+    for key in ("gamma_target", "gamma_interface", "gamma_next_layer", "applied_strain"):
+        v = fr.get(key)
+        if v is not None and (not isinstance(v, (int, float)) or isinstance(v, bool) or
+                              (key != "applied_strain" and v <= 0)):
+            return ENV.build(data=None, errors=[item("E100", field=f"fracture.{key}",
+                                                     detail=f"fracture.{key}는 양수(변형률은 실수)여야 합니다")],
+                             warnings=warnings, payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+
+    f = units.FROM_SI[si.unit_system]
+    f_gam = units.TO_SI[si.unit_system]["energy_area"]
+    tp = si.plies[target_ply]
+    # 하중 방향 x 기준 유효 계수 (취성층의 채널링은 x하중-횡방향 크랙 구도)
+    E_t = MAT.ex_engineering(tp.E1, tp.E2, tp.G12, tp.nu12, tp.angle_deg)
+    nu_t = tp.nu12 if tp.is_isotropic else 0.0  # 직교이방은 평면변형 보정 생략(1차 근사) — 가정 명시
+    h_t = tp.thickness
+
+    target_block = {"ply": target_ply, "name": tp.name,
+                    "thickness": h_t * f["z"], "E_x": E_t * f["modulus"]}
+
+    neighbors = []
+    for side, idx in (("below", target_ply - 1), ("above", target_ply + 1)):
+        if not (0 <= idx < n):
+            continue
+        np_ = si.plies[idx]
+        E_n = MAT.ex_engineering(np_.E1, np_.E2, np_.G12, np_.nu12, np_.angle_deg)
+        nu_n = np_.nu12 if np_.is_isotropic else 0.0
+        G_n = E_n / (2.0 * (1.0 + nu_n))
+        alpha_d, beta_d = FR.dundurs_parameters(E_t, nu_t, E_n, nu_n)
+        nb = {"ply": idx, "side": side, "name": np_.name,
+              "dundurs_alpha": alpha_d, "dundurs_beta": beta_d,
+              "shielding_tendency": ("이웃이 더 강성 → 개구 차폐" if alpha_d < 0
+                                     else "유연한 이웃 → 크랙 구동력 증폭 경향"),
+              "transfer_length": FR.shear_lag_transfer_length(E_t, h_t, np_.thickness, G_n) * f["z"]}
+        if np_.ve_E0 is not None and np_.ve_Einf is not None:
+            ve = FR.viscoelastic_relaxation_factor(np_.ve_E0, np_.ve_Einf)
+            alpha_rel, _ = FR.dundurs_parameters(
+                E_t, nu_t, np_.ve_Einf * (E_n / max(np_.ve_E0, 1e-300)), nu_n)
+            nb["viscoelastic"] = {
+                "E0": np_.ve_E0 * f["modulus"], "Einf": np_.ve_Einf * f["modulus"],
+                "tau_s": np_.ve_tau_s,
+                "transfer_length_growth": ve["transfer_length_growth"],
+                "dundurs_alpha_relaxed": alpha_rel,
+                "meaning": "이완 후 전달길이 ×배 → crack-opening 구속 저하 (준탄성 근사)",
+            }
+        neighbors.append(nb)
+
+    data: dict = {"target": target_block, "neighbors": neighbors}
+
+    eps = fr.get("applied_strain")
+    if eps is not None:
+        sigma_t = E_t * float(eps)
+        data["crack_driving"] = {
+            "applied_strain": float(eps),
+            "sigma_target": sigma_t * f["modulus"],
+            "G_ss_tunnel": FR.tunnel_crack_gss(sigma_t, h_t, E_t, nu_t) * f["energy_area"],
+            "crack_opening_max": FR.crack_opening_max(sigma_t, h_t, E_t, nu_t) * f["z"],
+            "definition": "G_ss=πσ²h/(4Ē) (균질 근사), δ_max=2σh/Ē",
+        }
+    g_t = fr.get("gamma_target")
+    if g_t is not None:
+        sc = FR.critical_channeling_stress(float(g_t) * f_gam, h_t, E_t, nu_t)
+        data["initiation_threshold"] = {
+            "sigma_critical": sc * f["modulus"],
+            "strain_critical": sc / E_t,
+            "definition": "σ_c=√(4ĒΓ/(πh)) — 박층일수록 문턱↑ (h_t 절반 ⇒ σ_c ×√2)",
+        }
+    if fr.get("gamma_interface") is not None or fr.get("gamma_next_layer") is not None:
+        data["interface_deflection"] = FR.interface_deflection_verdict(
+            float(fr["gamma_interface"]) * f_gam if fr.get("gamma_interface") is not None else None,
+            float(fr["gamma_next_layer"]) * f_gam if fr.get("gamma_next_layer") is not None else None)
+
+    extra = [
+        "파괴 해석 가정: 문헌 폐형해의 균질/1차 근사 — 채널링 g(α,β) 수치 보정·모드믹스 의존 계면인성 미탑재 (경향 판단용)",
+        "직교이방 ply는 하중방향 유효계수 E_x(θ) 기반 등가 등방 근사",
+        *_source_assumptions(si),
+    ]
+    hash_payload = {"laminate": payload, "target_ply": target_ply, "fracture": fracture}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warnings,
+                         payload=hash_payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warnings, payload=hash_payload,
+                     unit_system=si.unit_system, assumptions_extra=extra,
+                     include_debug=include_debug, t0=t0)

@@ -24,6 +24,15 @@ class SiPly:
     name: str | None
     source: SourceInfo | None
     is_isotropic: bool
+    alpha1: float | None = None   # 1/K (열해석 선택)
+    alpha2: float | None = None
+    ve_E0: float | None = None    # Pa (점탄성 보호층, §17.2 선택)
+    ve_Einf: float | None = None
+    ve_tau_s: float | None = None
+
+    @property
+    def has_cte(self) -> bool:
+        return self.alpha1 is not None and self.alpha2 is not None
 
 
 @dataclass
@@ -150,11 +159,35 @@ def validate_and_convert(payload) -> tuple[SiLaminate | None, list[dict], list[d
             warnings.append(item("W120", field=f"{base}.material.source",
                                  detail=f"{base}.material({m.name or m.type})의 상수가 가정값(assumed)입니다"))
 
+        # CTE (§17.1) — 값 자체는 단위계 무관 [1/K]. ppm 착오 휴리스틱.
+        if m.type == "isotropic":
+            a1 = a2 = m.alpha
+        else:
+            a1, a2 = m.alpha1, m.alpha2
+            if (a1 is None) != (a2 is None):
+                errors.append(item("E203", field=f"{base}.material",
+                                   detail=f"{base}: alpha1/alpha2는 둘 다 있어야 합니다"))
+        for nm, av in (("alpha", a1), ("alpha2", a2)):
+            if av is not None and abs(av) > 1.0e-3:
+                warnings.append(item("W110", field=f"{base}.material.{nm}",
+                                     detail=f"{base}.material.{nm} = {av} 1/K — ppm/K 값을 그대로 넣은 착오일 수 있습니다 (예: 17 ppm/K는 17e-6)"))
+                break
+
+        # 점탄성 (§17.2) — 이완이므로 Einf <= E0 이어야 물리적.
+        ve = m.viscoelastic
+        if ve is not None and ve.Einf > ve.E0:
+            errors.append(item("E100", field=f"{base}.material.viscoelastic",
+                               detail=f"{base}: Einf({ve.Einf}) > E0({ve.E0}) — 이완 특성은 Einf <= E0 이어야 합니다"))
+
         angle_norm = MAT.normalize_angle_deg(lam.angle_deg) if abs(lam.angle_deg) < 360.0 else 0.0
         rho_si = m.rho * f["density"] if m.rho is not None else None
         plies.append(SiPly(lam.thickness * f["length"], angle_norm, E1, E2, G12, nu12,
-                           rho_si, m.name, m.source, is_iso))
-        fingerprint.append((lam.thickness, angle_norm, E1, E2, G12, nu12, rho_si))
+                           rho_si, m.name, m.source, is_iso,
+                           alpha1=a1, alpha2=a2,
+                           ve_E0=ve.E0 * f["modulus"] if ve else None,
+                           ve_Einf=ve.Einf * f["modulus"] if ve else None,
+                           ve_tau_s=ve.tau_s if ve else None))
+        fingerprint.append((lam.thickness, angle_norm, E1, E2, G12, nu12, rho_si, a1, a2))
 
     if errors:
         return None, errors, warnings

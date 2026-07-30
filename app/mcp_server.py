@@ -146,6 +146,47 @@ def generate_design_report(laminate: dict, criteria: dict | None = None,
 
 
 @mcp.tool()
+def compute_thermal_response(laminate: dict, delta_T: float, panel: dict | None = None) -> dict:
+    """온도 변화에 대한 자유 열변형 — 유효 CTE, 열곡률, ply 잔류응력, (panel 주면) 판 휨.
+
+    각 ply material에 alpha(등방) 또는 alpha1/alpha2(직교이방) [1/K] 필요 (없으면 E203).
+    delta_T = T_현재 − T_무응력기준 [K] (리플로우 가열 +, 경화 후 냉각 −).
+    panel = {"Lx":, "Ly":} (길이 단위) → warpage.range = 판 위 최대−최소 처짐(coplanarity).
+    동박층처럼 혼합층은 먼저 homogenize_layer로 등가 물성을 만들어 넣을 것.
+    """
+    return _guarded(PIPE.run_thermal, laminate, delta_t=delta_T, panel=panel)
+
+
+@mcp.tool()
+def homogenize_layer(components: list[dict]) -> dict:
+    """혼합층(예: 동박률 있는 PCB 동박층)의 면내 등가 물성 — Voigt 병렬 균질화.
+
+    components = [{"material": {"type":"isotropic","E":..,"nu":..,"alpha":..,"rho":..},
+                   "volume_fraction": f}, ...] (Σf = 1).
+    동박률 70% 동박층 = [{Cu, f:0.7}, {수지, f:0.3}]. 반환 material을 laminae에 그대로 사용.
+    단위계 무관 — 출력 단위는 입력과 동일. E=Σf·E, α=Σf·E·α/Σf·E (힘 평형 가중).
+    """
+    try:
+        return PIPE.run_homogenize(components)
+    except Exception as e:  # noqa: BLE001
+        return ENV.build(data=None, errors=[item("E501", detail=type(e).__name__)],
+                         warnings=[], payload={"components": components if isinstance(components, list) else []})
+
+
+@mcp.tool()
+def assess_crack_shielding(laminate: dict, target_ply: int, fracture: dict | None = None) -> dict:
+    """피보호층(취성 target ply)의 크랙 발생 문턱과 이웃 보호층의 개구 차폐를 평가한다.
+
+    문헌 폐형해 기반: 터널크랙 G_ss=πσ²h/(4Ē), 임계 σ_c=√(4ĒΓ/πh)(박층 유리),
+    Dundurs α(이웃 강성차 → 차폐/증폭 경향), He-Hutchinson 1/4 법칙(계면 편향 저지),
+    shear-lag 전달길이, 보호층 점탄성 이완 시 차폐 저하(ℓ 성장 √(E0/E∞)).
+    fracture(선택) = {"applied_strain":, "gamma_target":, "gamma_interface":, "gamma_next_layer":}
+    (Γ 단위 SI: J/m², SI_mm: N/mm). 보호층 이완은 material.viscoelastic {E0,Einf,tau_s}로.
+    """
+    return _guarded(PIPE.run_crack_assessment, laminate, target_ply=target_ply, fracture=fracture)
+
+
+@mcp.tool()
 def get_reference_cases(case_id: str | None = None) -> dict:
     """내장 기준 케이스를 반환한다. case_id 생략 시 목록.
 
@@ -198,6 +239,10 @@ def guide() -> str:
    — ε0/κ, 유효 공학 상수, 누출/비틀림 지표, 주강성 방향.
 6) 설계 탐색 가속: 후보 여러 개를 batch_evaluate_laminates로 일괄 평가 → 유망 후보만 상세 분석.
 7) 공차 강건성: run_sensitivity_analysis. 최종 보고: generate_design_report(ko|en).
+8) 열 휨(PCB 등): 동박층은 homogenize_layer(동박률)로 등가 물성 →
+   compute_thermal_response(laminate, delta_T, panel={"Lx","Ly"}) — 유효 CTE·열곡률·휨·잔류응력.
+9) 크랙 차폐: assess_crack_shielding(laminate, target_ply, fracture) — 발생 문턱(σ_c),
+   Dundurs 차폐 경향, 계면 편향(1/4 법칙), 보호층 점탄성 이완의 차폐 저하.
 
 ## materialtwin 연계 (물성을 모를 때)
 - materialtwin MCP의 list_materials/search_by_property → get_material에서 실측 E를 얻는다.

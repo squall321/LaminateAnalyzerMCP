@@ -1,10 +1,12 @@
 [project]
 name = "laminate-analyzer-mcp"
-version = "0.2.1"
+version = "0.3.0"
 description = "적층 복합재 중립면·ABD·평가 지표를 결정론적으로 계산하는 MCP 서버 (stdio + HEAXHub streamable HTTP)"
 requires-python = ">=3.12"
 dependencies = [
-    "mcp>=1.10",
+    # mcp<2 핀: 2.0.0은 FastMCP를 제거하고 httpx→httpx2로 바꿔 이 코드와 비호환 (materialtwin과 동일 결정)
+    "mcp>=1.10,<2",
+    "httpx>=0.27",
     "numpy>=1.26",
     "pydantic>=2.7",
     "fastapi>=0.110",

@@ -14,12 +14,22 @@ class SourceInfo(BaseModel):
     confidence: str | None = Field(default=None, description="출처 신뢰도 라벨 (high/ok/low 등)")
 
 
+class Viscoelastic(BaseModel):
+    """보호층 이완 특성 (준탄성 근사용, §17.2). materialtwin Prony(E0/Einf/tau)와 단위 정합."""
+    model_config = ConfigDict(extra="forbid")
+    E0: float = Field(gt=0, description="즉시 탄성계수 (SI: Pa, SI_mm: MPa)")
+    Einf: float = Field(gt=0, description="완전 이완 탄성계수 (Einf <= E0)")
+    tau_s: float | None = Field(default=None, gt=0, description="이완 시정수 [s] (선택)")
+
+
 class IsotropicMaterial(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["isotropic"]
     E: float = Field(description="영률 (SI: Pa, SI_mm: MPa)")
     nu: float = Field(description="포아송비 (-1 < nu < 0.5)")
     rho: float | None = Field(default=None, gt=0, description="밀도 (SI: kg/m^3, SI_mm: t/mm^3). 질량 지표 계산 시에만 필요")
+    alpha: float | None = Field(default=None, description="열팽창계수 [1/K] (열해석 시 필요. ppm/K 아님 — 예: 구리 17e-6)")
+    viscoelastic: Viscoelastic | None = None
     name: str | None = Field(default=None, description="재료 라벨 (추적용)")
     source: SourceInfo | None = None
 
@@ -32,6 +42,9 @@ class Orthotropic2DMaterial(BaseModel):
     G12: float = Field(description="면내 전단탄성계수")
     nu12: float = Field(description="주 포아송비 (|nu12| < sqrt(E1/E2))")
     rho: float | None = Field(default=None, gt=0, description="밀도 (선택)")
+    alpha1: float | None = Field(default=None, description="섬유 방향 CTE [1/K] (탄소섬유는 음수 가능)")
+    alpha2: float | None = Field(default=None, description="횡방향 CTE [1/K]")
+    viscoelastic: Viscoelastic | None = None
     name: str | None = Field(default=None, description="재료 라벨 (추적용)")
     source: SourceInfo | None = None
 

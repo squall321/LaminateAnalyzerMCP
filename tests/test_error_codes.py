@@ -151,7 +151,7 @@ def test_w402_index_undefined(monkeypatch):
 
 def test_catalog_complete():
     """계획서 §6.4의 코드 전수가 카탈로그에 존재 (E400/E500은 V1 하중응답·타임아웃에서 트리거 예정)."""
-    expected = {"E100", "E101", "E102", "E103", "E104", "E200", "E201", "E202",
+    expected = {"E100", "E101", "E102", "E103", "E104", "E200", "E201", "E202", "E203",
                 "E300", "E301", "E400", "E402", "E403", "E500", "E501",
                 "W110", "W111", "W112", "W120", "W200", "W401", "W402"}
     assert expected == set(CATALOG)

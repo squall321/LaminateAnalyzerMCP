@@ -29,6 +29,10 @@ CATALOG: dict[str, tuple[str, str, str]] = {
     "E202": ("INVALID_MATERIAL_TYPE",
              "material.type이 유효하지 않습니다: {detail}",
              "material.type을 'isotropic'(E, nu) 또는 'orthotropic_2d'(E1, E2, G12, nu12)로 지정하세요."),
+    "E203": ("MISSING_THERMAL_PROPERTY",
+             "열해석에 필요한 CTE가 없는 ply가 있습니다: {detail}",
+             "해당 ply의 material에 alpha(등방) 또는 alpha1/alpha2(직교이방) [1/K]를 넣어 다시 호출하세요. "
+             "실측이 없으면 문헌 대표값 + source={{\"type\":\"assumed\"}}로 표기하세요."),
     # 기하 (E3xx)
     "E300": ("NON_POSITIVE_THICKNESS",
              "ply 두께는 양수여야 합니다: {detail}",

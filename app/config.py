@@ -1,8 +1,8 @@
 # 서버 버전·한계값·허용오차 상수의 단일 소스 (계획서 §11, §3 D12)
 
 SERVER_NAME = "laminate-analyzer"
-SERVER_VERSION = "0.2.0"
-ENGINE_VERSION = "0.2.0"
+SERVER_VERSION = "0.3.0"
+ENGINE_VERSION = "0.3.0"
 
 MAX_PLIES = 512
 MAX_PAYLOAD_BYTES = 1 * 1024 * 1024  # 1 MiB

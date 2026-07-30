@@ -537,6 +537,12 @@ def run_thermal(payload, delta_t, panel=None, include_debug: bool = False) -> di
     sig = TH.residual_ply_stresses(qbars, alphas, z, eps0, kappa, float(delta_t))
     per_ply = [{"ply": k, "sigma_xyz": (s * f["modulus"]).tolist()} for k, s in enumerate(sig)]
     worst = max(range(len(sig)), key=lambda k: float(np.max(np.abs(sig[k]))))
+    trunc_note = None
+    if len(per_ply) > config.SUMMARY_PLY_LIMIT:
+        ranked = sorted(per_ply, key=lambda r: -max(abs(v) for v in r["sigma_xyz"]))
+        per_ply = sorted(ranked[:config.SUMMARY_TOP_N], key=lambda r: r["ply"])
+        trunc_note = (f"ply {len(sig)}개 중 |σ| 상위 {len(per_ply)}개만 반환 (§6.6 토큰 예산). "
+                      f"max_abs는 전체 기준")
 
     data: dict = {
         "effective_cte": {
@@ -553,6 +559,7 @@ def run_thermal(payload, delta_t, panel=None, include_debug: bool = False) -> di
         "residual_stress": {
             "note": "ply 중앙면 값 σ = Q̄(ε0+z̄κ−αΔT). 힘 평형(Σσt=0)은 엔진 불변식",
             "per_ply": per_ply,
+            **({"truncation": trunc_note} if trunc_note else {}),
             "max_abs": {"ply": worst, "value": float(np.max(np.abs(sig[worst])) * f["modulus"])},
         },
     }
@@ -733,11 +740,13 @@ def run_crack_assessment(payload, target_ply, fracture=None, include_debug: bool
                      include_debug=include_debug, t0=t0)
 
 
-def run_ply_stresses(payload, loads=None, delta_t=None, include_debug: bool = False) -> dict:
+def run_ply_stresses(payload, loads=None, delta_t=None, detail: str = "auto",
+                     include_debug: bool = False) -> dict:
     """층별 기계(+선택 열) 응력 복원과 파손 판정 (recover_ply_stresses Tool, §17.4).
 
     강도(strength)가 있는 ply는 Tsai-Wu 강도비 R·Max Stress 모드까지, 없는 ply는 응력만.
     delta_t를 주면 열하중을 중첩한다(전 ply CTE 필요 — E203).
+    detail: "auto"(기본 — ply 수가 크면 임계 상위만 반환+note) | "full" | "summary".
     """
     from app.solver import failure as FAIL
     from app.solver import thermal as TH
@@ -815,10 +824,31 @@ def run_ply_stresses(payload, loads=None, delta_t=None, include_debug: bool = Fa
                 fpf = (worst_here[0], k, worst_here[1], worst_here[2]["governing_mode"])
         plies_out.append(row)
 
+    if detail not in ("auto", "full", "summary"):
+        return ENV.build(data=None, errors=[item("E100", field="detail",
+                                                 detail="detail은 auto|full|summary 중 하나여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    truncated_note = None
+    if detail != "full" and (detail == "summary" or len(plies_out) > config.SUMMARY_PLY_LIMIT):
+        # 임계도 순 상위 N만 (무단 절단 금지 — note로 명시, detail="full"로 전체 조회 가능)
+        def crit(row):
+            if "min_tsai_wu_R" in row:
+                return row["min_tsai_wu_R"]                      # R 작을수록 위험
+            return -max(abs(v) for e in row["stresses"].values() for v in e["sigma_xyz"])
+        keep = sorted(plies_out, key=crit)[:config.SUMMARY_TOP_N]
+        keep_ids = {r["ply"] for r in keep}
+        truncated_note = (f"ply {len(plies_out)}개 중 임계 상위 {len(keep)}개만 반환 "
+                          f"(기준: min Tsai-Wu R 오름차순, 강도 없으면 |σ| 내림차순). "
+                          f"전체는 detail=\"full\"로 재호출")
+        plies_out = sorted(keep, key=lambda r: r["ply"])
+
     data: dict = {"load_state": {"N": (N_si / units.TO_SI[si.unit_system]["load_n"]).tolist(),
                                  "M": M_si.tolist(),
                                  "delta_T": dT if dT != 0.0 else None},
                   "plies": plies_out}
+    if truncated_note:
+        data["truncation"] = truncated_note
     if fpf is not None:
         R, kp, loc, mode = fpf
         data["first_ply_failure"] = {

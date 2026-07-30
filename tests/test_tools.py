@@ -56,8 +56,8 @@ def test_evaluate_with_criteria():
 def test_reference_case_self_verification_loop():
     """get_reference_cases의 input을 analyze에 넣어 expected와 대조 — 에이전트 자가 검증 경로 그대로."""
     listing = srv.get_reference_cases()
-    assert {c["case_id"] for c in listing["cases"]} == {
-        "single_isotropic_alu", "cross_ply_symmetric", "cross_ply_unsymmetric"}
+    assert {"single_isotropic_alu", "cross_ply_symmetric", "cross_ply_unsymmetric",
+            "bimetal_thermal_warpage", "cross_ply_fpf"} <= {c["case_id"] for c in listing["cases"]}
 
     for cid in ("single_isotropic_alu", "cross_ply_symmetric", "cross_ply_unsymmetric"):
         case = srv.get_reference_cases(cid)

@@ -13,7 +13,10 @@ EXPECTED_TOOLS = {"analyze_laminate", "validate_laminate_input", "compute_abd_ma
                   "get_server_info",
                   # V1
                   "solve_load_response", "run_sensitivity_analysis",
-                  "batch_evaluate_laminates", "generate_design_report"}
+                  "batch_evaluate_laminates", "generate_design_report",
+                  # V2
+                  "compute_thermal_response", "homogenize_layer",
+                  "assess_crack_shielding", "recover_ply_stresses"}
 
 
 def test_tools_and_resources_exposed():

@@ -74,6 +74,48 @@ def _build_cases() -> dict[str, dict]:
         },
         "tolerance": {"rtol": 1e-9},
     }
+    # R6 — 바이메탈 열 휨 (compute_thermal_response few-shot, §17.1)
+    E1b, E2b, a1b, a2b, tb, dTb, Lb = 100000.0, 50000.0, 10e-6, 20e-6, 1.0, 100.0, 100.0
+    nb = E1b / E2b
+    hb = 2 * tb
+    kappa_b = 24.0 * (a2b - a1b) * dTb / (hb * (14.0 + nb + 1.0 / nb))   # Timoshenko (동일 ν ⇒ 판=보)
+    cases["bimetal_thermal_warpage"] = {
+        "description": "등두께 바이메탈(하: 저CTE 강성, 상: 고CTE 연성) ΔT=+100K — Timoshenko 폐형해 열곡률과 100×100 판 휨",
+        "input": {"laminate": {
+            "unit_system": "SI_mm", "name": "bimetal_thermal_warpage",
+            "laminae": [
+                {"thickness": tb, "angle_deg": 0.0,
+                 "material": {"type": "isotropic", "E": E1b, "nu": 0.3, "alpha": a1b}},
+                {"thickness": tb, "angle_deg": 0.0,
+                 "material": {"type": "isotropic", "E": E2b, "nu": 0.3, "alpha": a2b}},
+            ]},
+            "tool": "compute_thermal_response", "delta_T": dTb, "panel": {"Lx": Lb, "Ly": Lb}},
+        "expected": {
+            "closed_form": ["|kappa_x| = 24*(a2-a1)*dT/(h*(14+n+1/n)), n=E1/E2 (동일 ν ⇒ 판=보)",
+                            "warpage_range(정사각 판, 등2축) = kappa*L^2/4"],
+            "kappa_x_per_mm": kappa_b,
+            "warpage_range_mm": kappa_b * Lb * Lb / 4.0,
+        },
+        "tolerance": {"rtol": 1e-6},
+    }
+
+    # R7 — [0/90]s FPF (recover_ply_stresses few-shot, §17.2b)
+    strength = {"Xt": 1500.0, "Xc": 1200.0, "Yt": 40.0, "Yc": 246.0, "S": 68.0}
+    cases["cross_ply_fpf"] = {
+        "description": "[0/90]s CFRP Nx 인장 — first-ply-failure는 90° ply 횡인장(Yt) (고전 결과). Tsai-Wu R = 파손까지 하중 배수",
+        "input": {"laminate": {
+            "unit_system": "SI_mm", "name": "cross_ply_fpf",
+            "laminae": [{"thickness": t, "angle_deg": a,
+                         "material": dict(_T300_MPA, strength=dict(strength))}
+                        for a in (0.0, 90.0, 90.0, 0.0)]},
+            "tool": "recover_ply_stresses", "loads": {"N": [100.0, 0.0, 0.0]}},
+        "expected": {
+            "fpf_ply_in": [1, 2],
+            "governing_mode": "transverse_tension",
+            "property": "하중을 N×R로 재호출하면 R≈1 (강도비의 정의)",
+        },
+        "tolerance": {"note": "모드·ply는 정확 판정, R 수치는 엔진 계산값"},
+    }
     return cases
 
 

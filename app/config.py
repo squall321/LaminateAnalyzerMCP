@@ -1,13 +1,16 @@
 # 서버 버전·한계값·허용오차 상수의 단일 소스 (계획서 §11, §3 D12)
 
 SERVER_NAME = "laminate-analyzer"
-SERVER_VERSION = "0.4.0"
-ENGINE_VERSION = "0.4.0"
+SERVER_VERSION = "0.4.1"
+ENGINE_VERSION = "0.4.1"
 
 MAX_PLIES = 512
 MAX_PAYLOAD_BYTES = 1 * 1024 * 1024  # 1 MiB
 MAX_BATCH = 32
 COMPUTE_TIMEOUT_S = 10.0  # 반복형 계산(batch/sensitivity/스캔)의 시간 예산 → 초과 시 E500
+# ply별 상세 응답의 자동 요약 기준 (§6.6 토큰 예산): 초과 시 임계 상위 N개만 + note
+SUMMARY_PLY_LIMIT = 32
+SUMMARY_TOP_N = 10
 
 # 경고 휴리스틱 임계값 (계획서 §6.4 W110~W112, §5.4)
 COND_WARN_THRESHOLD = 1.0e8       # W401

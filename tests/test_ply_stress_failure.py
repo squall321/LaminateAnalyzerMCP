@@ -135,3 +135,37 @@ def test_units_bridge_stress():
     s_mm = srv.recover_ply_stresses(lam_mm, loads={"N": [100.0, 0, 0]})["data"]["plies"][0]["stresses"]["mid"]["sigma_xyz"][0]
     s_si = srv.recover_ply_stresses(lam_si, loads={"N": [100.0e3, 0, 0]})["data"]["plies"][0]["stresses"]["mid"]["sigma_xyz"][0]
     assert s_mm == pytest.approx(s_si * 1e-6, rel=1e-12)   # MPa vs Pa
+
+
+def test_large_laminate_auto_summary():
+    """§6.6 토큰 예산 — 32ply 초과 시 임계 상위만 + truncation note, detail=full로 전체."""
+    mat = {**T300, "strength": dict(CFRP_STRENGTH)}
+    big = {"unit_system": "SI_mm",
+           "laminae": [{"thickness": 0.125, "angle_deg": (0, 45, -45, 90)[i % 4],
+                        "material": dict(mat)} for i in range(64)]}
+    auto = srv.recover_ply_stresses(big, loads={"N": [100, 0, 0]})["data"]
+    assert "truncation" in auto and len(auto["plies"]) == 10
+    assert "first_ply_failure" in auto                      # FPF는 전체 기준 유지
+    full = srv.recover_ply_stresses(big, loads={"N": [100, 0, 0]}, detail="full")["data"]
+    assert "truncation" not in full and len(full["plies"]) == 64
+    # 요약에 FPF ply가 반드시 포함 (임계 상위 기준의 자기일관성)
+    assert any(p["ply"] == auto["first_ply_failure"]["ply"] for p in auto["plies"])
+    assert srv.recover_ply_stresses(big, loads={"N": [1, 0, 0]},
+                                    detail="전부")["errors"][0]["code"] == "E100"
+
+
+def test_reference_cases_for_new_tools():
+    """few-shot 케이스가 실제 엔진과 일치 (bimetal 열휨 폐형해, FPF 모드)."""
+    bi = srv.get_reference_cases("bimetal_thermal_warpage")
+    env = srv.compute_thermal_response(bi["input"]["laminate"],
+                                       delta_T=bi["input"]["delta_T"], panel=bi["input"]["panel"])
+    assert abs(env["data"]["response"]["kappa"][0]) == pytest.approx(
+        bi["expected"]["kappa_x_per_mm"], rel=1e-6)
+    assert env["data"]["warpage"]["range"] == pytest.approx(
+        bi["expected"]["warpage_range_mm"], rel=1e-6)
+
+    fp = srv.get_reference_cases("cross_ply_fpf")
+    env2 = srv.recover_ply_stresses(fp["input"]["laminate"], loads=fp["input"]["loads"])
+    fpf = env2["data"]["first_ply_failure"]
+    assert fpf["ply"] in fp["expected"]["fpf_ply_in"]
+    assert fpf["governing_mode"] == fp["expected"]["governing_mode"]

@@ -188,7 +188,7 @@ def assess_crack_shielding(laminate: dict, target_ply: int, fracture: dict | Non
 
 @mcp.tool()
 def recover_ply_stresses(laminate: dict, loads: dict | None = None,
-                         delta_T: float | None = None) -> dict:
+                         delta_T: float | None = None, detail: str = "auto") -> dict:
     """층별 응력 복원 + (강도 있으면) 파손 판정 — first-ply-failure와 여유율까지.
 
     loads = {"N":[Nx,Ny,Nxy], "M":[Mx,My,Mxy]} (단위 폭당), delta_T [K]를 주면 열하중 중첩
@@ -196,8 +196,9 @@ def recover_ply_stresses(laminate: dict, loads: dict | None = None,
     material.strength {Xt,Xc,Yt,Yc,S}(압축 양수 관례)가 있는 ply는 Tsai-Wu 강도비 R
     (하중 R배에서 파손 — R>1 안전)과 Max Stress 지배 모드(섬유/횡/전단)를 함께 반환.
     first_ply_failure = 전 ply 최소 R. 강도는 materialtwin property registry에서 조달 가능.
+    detail: "auto"(기본 — 32ply 초과 시 임계 상위 10개만+truncation note) | "full" | "summary".
     """
-    return _guarded(PIPE.run_ply_stresses, laminate, loads=loads, delta_t=delta_T)
+    return _guarded(PIPE.run_ply_stresses, laminate, loads=loads, delta_t=delta_T, detail=detail)
 
 
 @mcp.tool()

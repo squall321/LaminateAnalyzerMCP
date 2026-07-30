@@ -35,7 +35,8 @@
 - [x] 검증: Timoshenko 바이메탈 rel 1e-6, 평형 불변식, Griffith 항등, 단위 브리지 — 테스트 122종 전부 통과
 - [x] mcp<2 핀 (2.0이 FastMCP 제거 — materialtwin과 동일 결정), venv 재생성
 - [ ] **라이브 반영 = GitHub push (사람 액션)** — 배포가 git source(SIF)로 전환되어 push 후 스캐너 자동 재빌드·게이트웨이 반영
-- [ ] 다음 물리 확장: 층별 기계 응력 복원·파손 판정(materialtwin 강도 데이터 연동), 좌굴, check_design_rules
+- [x] 층별 기계 응력 복원 + 파손 판정 — recover_ply_stresses (v0.4.0): σ_xyz/σ1σ2τ12 3점 복원, Tsai-Wu R·Max Stress 모드·FPF, ΔT 중첩. [0/90]s FPF=90°횡인장·하중×R→R=1 검증, 테스트 132
+- [ ] 다음 물리 확장: 좌굴, check_design_rules, 층간(ILSS)
 
 ## 2026-07-16 세션 1 (MVP + hwax 등록 준비) — 서버 0.1.0
 

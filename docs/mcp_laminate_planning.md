@@ -824,10 +824,22 @@ call get_reference_cases for worked examples.
   피로 진전(Paris) — 문헌 보정계수의 수기 이식 리스크 때문. 경향 판단은 Dundurs 부호+상기
   폐형해로 충분하며, 정밀치가 필요해지면 표 데이터를 출처와 함께 별도 탑재.
 
+### 17.2b 층별 응력 복원 + 파손 판정 (recover_ply_stresses, §17.4로도 참조)
+
+- 재료에 선택 `strength: {Xt, Xc, Yt, Yc, S}` (압축 양수 관례, SI: Pa / SI_mm: MPa).
+- 응력 복원: [ε₀;κ] = K⁻¹[N+N_th; M+M_th] (ΔT 선택 중첩) → ply별 bottom/mid/top에서
+  σ_xyz = Q̄(ε₀+zκ−αΔT) → 재료축 σ₁/σ₂/τ₁₂ (표준 응력 변환).
+- 판정: **Tsai-Wu 강도비 R**(aR²+bR=1의 양근 — 하중 R배에서 파손면, R>1 여유,
+  F12=−½√(F11F22) 표준) 주지표 + **Max Stress 지배 모드**(섬유/횡/전단 인장·압축) 설명자.
+- first_ply_failure = 전 ply·전 위치 최소 R. strength 없는 ply는 응력만(노트로 안내).
+- 검증: 막 σ=N/h·굽힘 표면 σ=6M/h²(정역학 항등)·45° 변환 폐형해·막힘 평형 ΣσT=N·
+  Tsai-Wu 단축 환원(R=Xt/σ 등)·[0/90]s FPF가 90°ply 횡인장이며 하중×R 재해석 시 R→1.
+
 ### 17.3 도구·검증
 
 - 신규 Tool 3종: `compute_thermal_response(laminate, delta_T, panel?)`,
-  `homogenize_layer(components)`, `assess_crack_shielding(laminate, target_ply, fracture?)` → 총 14종.
+  `homogenize_layer(components)`, `assess_crack_shielding(laminate, target_ply, fracture?)`,
+  `recover_ply_stresses(laminate, loads?, delta_T?)` → 총 15종.
 - 오류: **E203 MISSING_THERMAL_PROPERTY** (CTE 없는 ply로 열해석 요청 시, ply 지목).
 - 테스트: Timoshenko 대조, 대칭→κ_th=0, 단일재 α_eff=α·κ=0, 잔류응력 평형(ΣF=ΣM=0),
   warpage 실린더 기하, ROM 극한(f=1/0)·단조성, Griffith↔터널 G_ss 항등, He–H 문턱,

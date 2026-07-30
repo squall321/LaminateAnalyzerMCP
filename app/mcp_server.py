@@ -187,6 +187,20 @@ def assess_crack_shielding(laminate: dict, target_ply: int, fracture: dict | Non
 
 
 @mcp.tool()
+def recover_ply_stresses(laminate: dict, loads: dict | None = None,
+                         delta_T: float | None = None) -> dict:
+    """층별 응력 복원 + (강도 있으면) 파손 판정 — first-ply-failure와 여유율까지.
+
+    loads = {"N":[Nx,Ny,Nxy], "M":[Mx,My,Mxy]} (단위 폭당), delta_T [K]를 주면 열하중 중첩
+    (전 ply CTE 필요). 각 ply의 bottom/mid/top에서 적층판축 σ_xyz와 재료축 σ1/σ2/τ12 반환.
+    material.strength {Xt,Xc,Yt,Yc,S}(압축 양수 관례)가 있는 ply는 Tsai-Wu 강도비 R
+    (하중 R배에서 파손 — R>1 안전)과 Max Stress 지배 모드(섬유/횡/전단)를 함께 반환.
+    first_ply_failure = 전 ply 최소 R. 강도는 materialtwin property registry에서 조달 가능.
+    """
+    return _guarded(PIPE.run_ply_stresses, laminate, loads=loads, delta_t=delta_T)
+
+
+@mcp.tool()
 def get_reference_cases(case_id: str | None = None) -> dict:
     """내장 기준 케이스를 반환한다. case_id 생략 시 목록.
 
@@ -243,6 +257,8 @@ def guide() -> str:
    compute_thermal_response(laminate, delta_T, panel={"Lx","Ly"}) — 유효 CTE·열곡률·휨·잔류응력.
 9) 크랙 차폐: assess_crack_shielding(laminate, target_ply, fracture) — 발생 문턱(σ_c),
    Dundurs 차폐 경향, 계면 편향(1/4 법칙), 보호층 점탄성 이완의 차폐 저하.
+10) 층별 응력·파손: recover_ply_stresses(laminate, loads, delta_T?) — ply별 σ1/σ2/τ12와
+    (strength 있으면) Tsai-Wu 여유율 R·지배 모드·first_ply_failure. 강도는 materialtwin에서.
 
 ## materialtwin 연계 (물성을 모를 때)
 - materialtwin MCP의 list_materials/search_by_property → get_material에서 실측 E를 얻는다.

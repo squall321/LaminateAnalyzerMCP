@@ -14,6 +14,16 @@ class SourceInfo(BaseModel):
     confidence: str | None = Field(default=None, description="출처 신뢰도 라벨 (high/ok/low 등)")
 
 
+class Strength(BaseModel):
+    """ply 강도 5종 (파손 판정용, §17.4). 압축 강도는 양수 크기 관례. 단위 SI: Pa, SI_mm: MPa."""
+    model_config = ConfigDict(extra="forbid")
+    Xt: float = Field(gt=0, description="섬유(1축) 인장강도")
+    Xc: float = Field(gt=0, description="섬유 압축강도 (양수 크기)")
+    Yt: float = Field(gt=0, description="횡(2축) 인장강도")
+    Yc: float = Field(gt=0, description="횡 압축강도 (양수 크기)")
+    S: float = Field(gt=0, description="면내 전단강도")
+
+
 class Viscoelastic(BaseModel):
     """보호층 이완 특성 (준탄성 근사용, §17.2). materialtwin Prony(E0/Einf/tau)와 단위 정합."""
     model_config = ConfigDict(extra="forbid")
@@ -30,6 +40,7 @@ class IsotropicMaterial(BaseModel):
     rho: float | None = Field(default=None, gt=0, description="밀도 (SI: kg/m^3, SI_mm: t/mm^3). 질량 지표 계산 시에만 필요")
     alpha: float | None = Field(default=None, description="열팽창계수 [1/K] (열해석 시 필요. ppm/K 아님 — 예: 구리 17e-6)")
     viscoelastic: Viscoelastic | None = None
+    strength: Strength | None = None
     name: str | None = Field(default=None, description="재료 라벨 (추적용)")
     source: SourceInfo | None = None
 
@@ -45,6 +56,7 @@ class Orthotropic2DMaterial(BaseModel):
     alpha1: float | None = Field(default=None, description="섬유 방향 CTE [1/K] (탄소섬유는 음수 가능)")
     alpha2: float | None = Field(default=None, description="횡방향 CTE [1/K]")
     viscoelastic: Viscoelastic | None = None
+    strength: Strength | None = None
     name: str | None = Field(default=None, description="재료 라벨 (추적용)")
     source: SourceInfo | None = None
 

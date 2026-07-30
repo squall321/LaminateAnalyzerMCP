@@ -29,6 +29,7 @@ class SiPly:
     ve_E0: float | None = None    # Pa (점탄성 보호층, §17.2 선택)
     ve_Einf: float | None = None
     ve_tau_s: float | None = None
+    strength: tuple | None = None  # (Xt,Xc,Yt,Yc,S) Pa (파손 판정, §17.4 선택)
 
     @property
     def has_cte(self) -> bool:
@@ -186,7 +187,10 @@ def validate_and_convert(payload) -> tuple[SiLaminate | None, list[dict], list[d
                            alpha1=a1, alpha2=a2,
                            ve_E0=ve.E0 * f["modulus"] if ve else None,
                            ve_Einf=ve.Einf * f["modulus"] if ve else None,
-                           ve_tau_s=ve.tau_s if ve else None))
+                           ve_tau_s=ve.tau_s if ve else None,
+                           strength=(tuple(getattr(m.strength, k) * f["modulus"]
+                                           for k in ("Xt", "Xc", "Yt", "Yc", "S"))
+                                     if m.strength is not None else None)))
         fingerprint.append((lam.thickness, angle_norm, E1, E2, G12, nu12, rho_si, a1, a2))
 
     if errors:

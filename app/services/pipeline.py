@@ -731,3 +731,115 @@ def run_crack_assessment(payload, target_ply, fracture=None, include_debug: bool
     return ENV.build(data=data, errors=[], warnings=warnings, payload=hash_payload,
                      unit_system=si.unit_system, assumptions_extra=extra,
                      include_debug=include_debug, t0=t0)
+
+
+def run_ply_stresses(payload, loads=None, delta_t=None, include_debug: bool = False) -> dict:
+    """층별 기계(+선택 열) 응력 복원과 파손 판정 (recover_ply_stresses Tool, §17.4).
+
+    강도(strength)가 있는 ply는 Tsai-Wu 강도비 R·Max Stress 모드까지, 없는 ply는 응력만.
+    delta_t를 주면 열하중을 중첩한다(전 ply CTE 필요 — E203).
+    """
+    from app.solver import failure as FAIL
+    from app.solver import thermal as TH
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+
+    N_si, M_si, load_err = _loads_to_si(loads, si.unit_system)
+    if load_err is not None and delta_t is None:
+        return ENV.build(data=None, errors=[load_err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+    if load_err is not None:                      # 열 단독 하중 허용 (loads 생략/0 가능)
+        N_si, M_si = np.zeros(3), np.zeros(3)
+    if delta_t is not None and (not isinstance(delta_t, (int, float)) or isinstance(delta_t, bool)):
+        return ENV.build(data=None, errors=[item("E100", field="delta_T",
+                                                 detail="delta_T는 숫자 [K]여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    alphas = None
+    dT = float(delta_t) if delta_t is not None else 0.0
+    if dT != 0.0:
+        alphas, cte_err = _cte_vectors_or_error(si)
+        if cte_err:
+            return ENV.build(data=None, errors=cte_err, warnings=warnings, payload=payload,
+                             unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    A, B, D, z, h = _abd_of_plies(si.plies)
+    qbars = [MAT.qbar_matrix(MAT.q_matrix(p.E1, p.E2, p.G12, p.nu12), p.angle_deg) for p in si.plies]
+    N_tot, M_tot = N_si.copy(), M_si.copy()
+    if dT != 0.0:
+        N_th, M_th = TH.thermal_loads(qbars, alphas, z, dT)
+        N_tot += N_th
+        M_tot += M_th
+    try:
+        eps0, kappa = RESP.solve_response(A, B, D, N_tot, M_tot)
+    except RESP.SingularSystemError:
+        return ENV.build(data=None, errors=[item("E400", field="laminate")], warnings=warnings,
+                         payload=payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    f = units.FROM_SI[si.unit_system]
+    plies_out = []
+    fpf = None                      # (R, ply, loc, mode)
+    no_strength = []
+    for k, p in enumerate(si.plies):
+        a_vec = alphas[k] if alphas is not None else None
+        locs = {"bottom": float(z[k]), "mid": float(z[k] + z[k + 1]) / 2.0, "top": float(z[k + 1])}
+        row = {"ply": k, "angle_deg": p.angle_deg, "name": p.name, "stresses": {}}
+        worst_here = None           # (R, loc, assess)
+        for loc, zv in locs.items():
+            s_xyz = FAIL.ply_stresses_at(qbars[k], eps0, kappa, zv, a_vec, dT)
+            s_12 = FAIL.stress_to_material_axes(s_xyz, p.angle_deg)
+            entry = {"sigma_xyz": (s_xyz * f["modulus"]).tolist(),
+                     "sigma_12": (s_12 * f["modulus"]).tolist()}
+            if p.strength is not None:
+                assess = FAIL.assess_ply(s_12, p.strength)
+                entry["failure"] = {
+                    "tsai_wu_R": assess["tsai_wu"].get("strength_ratio"),
+                    "max_stress_FI": assess["max_stress"]["failure_index"],
+                    "governing_mode": assess["governing_mode"],
+                    "fails": assess["fails"],
+                }
+                R = assess["tsai_wu"].get("strength_ratio")
+                if R is not None and (worst_here is None or R < worst_here[0]):
+                    worst_here = (R, loc, assess)
+            row["stresses"][loc] = entry
+        if p.strength is None:
+            no_strength.append(k)
+        elif worst_here is not None:
+            row["min_tsai_wu_R"] = worst_here[0]
+            if fpf is None or worst_here[0] < fpf[0]:
+                fpf = (worst_here[0], k, worst_here[1], worst_here[2]["governing_mode"])
+        plies_out.append(row)
+
+    data: dict = {"load_state": {"N": (N_si / units.TO_SI[si.unit_system]["load_n"]).tolist(),
+                                 "M": M_si.tolist(),
+                                 "delta_T": dT if dT != 0.0 else None},
+                  "plies": plies_out}
+    if fpf is not None:
+        R, kp, loc, mode = fpf
+        data["first_ply_failure"] = {
+            "ply": kp, "location": loc, "tsai_wu_R": R, "governing_mode": mode,
+            "fails_at_current_load": bool(R <= 1.0),
+            "meaning": "현재 하중을 R배 하면 해당 ply가 Tsai-Wu 파손면에 도달 (R>1 = 여유)",
+        }
+    if no_strength:
+        data["note"] = f"laminae{no_strength}는 strength 미입력 — 응력만 복원(파손 판정 제외). " \
+                       f"강도는 material.strength {{Xt,Xc,Yt,Yc,S}}로 입력"
+
+    extra = [
+        "파손 판정: Tsai-Wu(F12=-0.5√(F11F22) 표준 상호작용) 강도비 R 주지표 + Max Stress 지배 모드",
+        "응력은 각 ply의 bottom/mid/top 3점 (ply 내 z 선형)",
+        *(["열하중 중첩: 선형 CTE, 자유 경계 (§17.1 가정 동일)"] if dT != 0.0 else []),
+        *_source_assumptions(si),
+    ]
+    hash_payload = {"laminate": payload, "loads": loads, "delta_T": delta_t}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warnings,
+                         payload=hash_payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warnings, payload=hash_payload,
+                     unit_system=si.unit_system, assumptions_extra=extra,
+                     include_debug=include_debug, t0=t0)

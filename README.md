@@ -6,12 +6,14 @@ LLM 에이전트가 계산을 직접 하지 않고 이 서버를 호출한다. �
 - 계획/사양: [docs/mcp_laminate_planning.md](docs/mcp_laminate_planning.md) (수학 사양·규약·오류코드의 단일 소스)
 - 진행 상태: [checklist.md](checklist.md) · 결정 기록: [context-notes.md](context-notes.md)
 
-## Tool 11종 (MVP 7 + V1 4)
+## Tool 15종 (MVP 7 + V1 4 + V2 4)
 
 `analyze_laminate`(원샷 진입점) · `validate_laminate_input` · `compute_abd_matrix` ·
 `compute_neutral_axis` · `evaluate_laminate` · `get_reference_cases`(폐형해 자가검증) · `get_server_info` ·
 `solve_load_response`(ε0/κ·유효 공학 상수) · `run_sensitivity_analysis` ·
-`batch_evaluate_laminates`(≤32) · `generate_design_report`(ko/en)
+`batch_evaluate_laminates`(≤32) · `generate_design_report`(ko/en) ·
+`compute_thermal_response`(유효 CTE·열곡률·PCB 휨) · `homogenize_layer`(동박률) ·
+`assess_crack_shielding`(크랙 문턱·보호층 차폐·점탄성 이완) · `recover_ply_stresses`(층별 응력·Tsai-Wu 파손)
 
 핵심 규약. `laminae[0]` = 최하단 ply, 각도 deg(CCW), `unit_system` 필수(`SI` | `SI_mm`), 하중은 단위 폭당.
 에이전트용 상세 절차는 [docs/agent_guide.md](docs/agent_guide.md), 수식 유도는 [docs/math_spec.md](docs/math_spec.md),

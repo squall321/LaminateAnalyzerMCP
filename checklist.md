@@ -18,14 +18,14 @@
 ### 남은 것
 
 - [x] ~~포털 경유 MCP 접속 마무리~~ — **HEAXHub에 PAT 기능 정식 구현으로 완결** (commit 6221405). Bearer PAT로 Caddy 경유 initialize→tools/list SSE 세션 관통 실증 (§16.6 항목 2·3·4 완료). E2E용 PAT(`laminate-mcp-e2e`, admin, 365d)는 scratchpad `pat.txt`에 1회 출력됨 — 개인 토큰은 `POST /api/v1/auth/tokens`로 직접 발급, 폐기는 `DELETE /api/v1/auth/tokens/{id}`
-- [ ] GitHub push (`squall321/LaminateAnalyzerMCP` + HEAXHub PAT 커밋 2건) — **사람 액션(gh 인증)**
+- [x] ~~GitHub push~~ — 완료 (2026-07-31, v0.4.1·v0.5.0 반영)
 - [ ] P4 잔여 — 문헌 벤치마크 공표값 대조 1건
 - [ ] cae00 오프라인 배송 방식에 포함 (§16.6 항목 5, 유일 잔여 검증)
 - [x] ~~materialtwin HTTP transport~~ — **완료(2026-07-16 밤, 병행 협업)**: 웹앱 /mcp 마운트(SIF v1.1.0, bare-path 수정), 삭제 툴 HTTP 비노출, manifest opt-in → 게이트웨이 자동 합류(도구 147). 게이트웨이 한 세션에서 재료 실측 E→적층 해석 체인 실증(W120 추적, Â11=E/(1-ν²) 일치)
 - [ ] (선택) HEAXHub 프론트에 PAT 관리 UI (현재는 API 발급)
 - [x] 계산도구×페르소나 스케일 설계를 **HWAXPortal에 전달** — `HWAXPortal/docs/CALC-TOOLS-FEDERATION-SCALING.md` (불변식 5 + 백로그 A1/A2/G1/G2). 실행 주체는 포털 관제 측
 - [ ] materialtwin 잔여 갭 — register_tensile_test orientation 입력 파라미터, update_material attributes 쓰기 (조회 노출은 완료)
-- [ ] V2 — 열/흡습(CTE·ΔT, warpage), 층별 응력 복원, 파손 판정(Tsai-Wu 등)
+- [x] ~~V2 열/흡습·층별 응력 복원·파손 판정~~ — 완료 (v0.3.0 열휨+크랙차폐, v0.4.0 응력·Tsai-Wu, v0.5.0 흡습)
 
 ## 2026-07-30 세션 (V2-1차: 열 휨 + 크랙 차폐, 서버 0.3.0)
 
@@ -37,7 +37,23 @@
 - [x] ~~라이브 반영~~ — **push 완료(2026-07-31)**: v0.4.1 SIF 재빌드·재기동(/health 0.4.1), 게이트웨이 재기동으로 신규 4종 노출(188 도구). 카탈로그 라벨 0.4.1 동기화(HEAXHub 커밋)
 - [ ] (포털 백로그 G3) 게이트웨이: 기존 백엔드 인스턴스 교체 시 도구 목록 재집계 안 됨 — 세션은 재연결되나 신규 도구는 게이트웨이 재기동 전까지 미노출 (이번에 실측)
 - [x] 층별 기계 응력 복원 + 파손 판정 — recover_ply_stresses (v0.4.0): σ_xyz/σ1σ2τ12 3점 복원, Tsai-Wu R·Max Stress 모드·FPF, ΔT 중첩. [0/90]s FPF=90°횡인장·하중×R→R=1 검증, 테스트 132
-- [ ] 다음 물리 확장: 좌굴, check_design_rules, 층간(ILSS)
+- [x] ~~좌굴·check_design_rules~~ — 완료 (v0.5.0: 설계규칙·좌굴·진동·진행성파손·흡습, 적대 검증 19건 수정)
+
+## 남은 것 (2026-07-31 기준)
+
+### 물리 확장 (다음 스프린트 후보)
+- [ ] 층간(ILSS) — 횡전단 τ=1.5V/h 대비 ILSS, 자유단 박리 경향
+- [ ] 샌드위치/FSDT — 코어 전단 유연성 (CLT의 명시된 한계 해소)
+- [ ] 점탄성 감쇠 합성 — 모달 손실계수(디스플레이 스택 낙하·진동, Prony 연동)
+- [ ] 간이 피로 (S-N/Goodman), 채널링 g(α,β) 보정표(출처 명기 조건부)
+
+### 품질·플랫폼
+- [ ] P4 잔여 — 문헌 벤치마크 공표값 대조 1건 (유일한 검증 잔여)
+- [ ] cae00 오프라인 배송 방식에 포함 (§16.6 항목 5)
+- [ ] G3 게이트웨이 재집계 (포털 백로그) — 인스턴스 교체 시 도구 목록 미갱신
+- [ ] 게이트웨이 프로세스 관리 (systemd 등) — 세션 종속 기동의 취약성 실측됨
+- [ ] materialtwin 갭 2건 — register_tensile_test orientation 입력, update_material attributes 쓰기
+- [ ] (선택) HEAXHub 프론트 PAT 관리 UI
 
 ## 2026-07-16 세션 1 (MVP + hwax 등록 준비) — 서버 0.1.0
 

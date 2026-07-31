@@ -343,7 +343,7 @@ def test_f5_assumptions_no_self_contradiction():
 
 
 def test_f10_version_bumped():
-    assert srv.get_server_info()["server_version"] == "0.7.0"
+    assert srv.get_server_info()["server_version"] == "0.7.1"
 
 
 def test_reference_cases_for_sprint_tools():

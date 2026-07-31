@@ -153,6 +153,26 @@ def _build_cases() -> dict[str, dict]:
         },
         "tolerance": {"note": "판정형 케이스 — 수치 허용오차 없음"},
     }
+    # R10 — 피로 사이클 (estimate_fatigue_life few-shot, §17.7)
+    fat_mat = dict(_T300_MPA, strength={"Xt": 1500.0, "Xc": 1200.0, "Yt": 40.0, "Yc": 246.0, "S": 68.0},
+                   fatigue={"model_type": "log_linear", "k": 0.1})
+    cases["fatigue_reversed_cycle"] = {
+        "description": "[0/90]s 완전반복(R=−1) 사이클 — 피로에서 가장 가혹한 형태. "
+                       "같은 최대하중의 영-인장(R=0)보다 수명이 짧아야 한다",
+        "input": {"laminate": {
+            "unit_system": "SI_mm", "name": "fatigue_reversed_cycle",
+            "laminae": [{"thickness": t, "angle_deg": a, "material": dict(fat_mat)}
+                        for a in (0.0, 90.0, 90.0, 0.0)]},
+            "tool": "estimate_fatigue_life",
+            "loads_max": {"N": [100.0, 0.0, 0.0]},
+            "loads_min": {"N": [-100.0, 0.0, 0.0]}},
+        "expected": {
+            "property": "life(R=−1) < life(R=0, loads_min 생략) — 진폭이 2배이므로",
+            "governing_component_in": ["sigma_1", "sigma_2", "tau_12"],
+            "note": "S-N은 log_linear k=0.1 (CFRP 관례: 10^7 사이클 강도 ≈ 정적의 30%)",
+        },
+        "tolerance": {"note": "판정형 — 순서 관계와 지배 성분을 확인"},
+    }
     return cases
 
 

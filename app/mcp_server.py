@@ -267,15 +267,20 @@ def compute_interlaminar_stresses(laminate: dict, shear: dict, detail: str = "au
 
 
 @mcp.tool()
-def estimate_fatigue_life(laminate: dict, loads_max: dict, loads_min: dict | None = None) -> dict:
+def estimate_fatigue_life(laminate: dict, loads_max: dict, loads_min: dict | None = None,
+                          detail: str = "auto") -> dict:
     """하중 사이클에 대한 ply별 피로 수명(반복 횟수) 추정.
 
-    loads_max/loads_min = {"N":[...], "M":[...]} (단위 폭당). loads_min 생략 시 0(영-인장, R=0).
-    각 ply에 strength{Xt,Xc,Yt,Yc,S}와 fatigue{model_type:"log_linear"|"basquin", k|b}가 필요.
-    정적 파손지수 FI=1/R(Tsai-Wu) 공간에서 Goodman 평균응력 보정 후 S-N을 적용하므로
-    다축·오프액시스 응력이 자동 처리된다. life_cycles = 임계 ply 수명(등진폭 1차 근사).
+    loads_max/loads_min = {"N":[...], "M":[...]} (단위 폭당). loads_min 생략 시 0 → 영-인장(R=0).
+    완전반복은 loads_min에 부호 반대 하중을 준다(예: max N=[100,0,0], min N=[-100,0,0]).
+    두 인자의 순서는 결과에 영향을 주지 않는다(성분별로 정렬).
+    각 ply에 strength{Xt,Xc,Yt,Yc,S}와 fatigue{model_type:"log_linear"|"basquin", k|b} 필요.
+    재료축 성분(σ1/σ2/τ12)별 부호 보존 진폭·평균에 표준 Goodman + S-N을 적용하고, 최소 수명
+    성분이 governing_component로 보고된다. life_cycles = 임계 ply 수명(등진폭·비례하중 1차 근사).
+    strength/fatigue 없는 ply는 제외되며 W120으로 알린다(임계 ply가 빠지면 과대평가).
     """
-    return _guarded(PIPE.run_fatigue, laminate, loads_max=loads_max, loads_min=loads_min)
+    return _guarded(PIPE.run_fatigue, laminate, loads_max=loads_max, loads_min=loads_min,
+                    detail=detail)
 
 
 @mcp.tool()

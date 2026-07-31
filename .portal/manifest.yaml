@@ -1,7 +1,7 @@
 schema_version: 2
 id: laminate_analyzer_mcp
 name: Laminate Analyzer MCP
-version: 0.7.0
+version: 0.7.1
 owner: cae-automation
 status: beta
 app_type: web_app
@@ -17,8 +17,10 @@ description: |
   - Tool 21종: analyze_laminate(원샷 진입점), validate_laminate_input, compute_abd_matrix,
     compute_neutral_axis, evaluate_laminate, get_reference_cases(폐형해 자가검증), get_server_info,
     solve_load_response(하중응답·유효상수), run_sensitivity_analysis, batch_evaluate_laminates,
-    generate_design_report(ko/en), recover_ply_stresses(층별 응력·Tsai-Wu 파손·FPF), compute_thermal_response(유효 CTE·열곡률·PCB 휨·잔류응력),
-    homogenize_layer(동박률 등가 물성), assess_crack_shielding(크랙 문턱·보호층 차폐·점탄성 이완).
+    generate_design_report(ko/en), recover_ply_stresses(층별 응력·Tsai-Wu 파손·FPF), compute_thermal_response(유효 CTE·열/흡습 곡률·PCB 휨),
+    homogenize_layer(동박률 등가 물성), assess_crack_shielding(크랙 문턱·보호층 차폐·점탄성 이완),
+    check_design_rules(적층 관례 판정), compute_buckling, compute_natural_frequencies(모달 감쇠·횡전단 유연성),
+    run_progressive_failure(한계하중), compute_interlaminar_stresses(층간 전단·박리), estimate_fatigue_life(반복 수명).
   - 규약: laminae[0]=최하단 ply, 각도 deg CCW, unit_system 필수(SI | SI_mm).
   - materialtwin_web MCP와 연계: 실측 물성(E)을 materialtwin에서 조회해 ply 입력으로 사용
     (E_GPa→MPa ×1000, 미실측 상수는 source={"type":"assumed"}로 W120 추적).

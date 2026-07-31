@@ -953,11 +953,16 @@ ILSS 여유율 스케일링, 단위 브리지, 결정론, 엣지(V=0·ilss 부�
 ### 17.7.1 estimate_fatigue_life — 정규화 파손지수 S-N
 
 - 재료 선택 필드 `fatigue: {model_type: "log_linear"|"basquin", k|b}`.
-- **정규화 접근**: FI = 1/R(Tsai-Wu)는 정적 한계 대비 비율이라 FI=1이 파손. 이 공간에서
-  Goodman 보정 FI_ar = FI_a/(1−FI_m) 후 S-N을 적용하면 다축·오프액시스가 자동 처리되고
-  단축 케이스에서 고전 σ/σ_u 식과 일치한다.
-- log_linear: N = 10^((1−FI_ar)/k) [CFRP 관례 k≈0.1] · basquin: N = FI_ar^(−1/b) [금속].
-- ply×3점 중 최소 수명을 ply 대표로, 전 ply 최소가 life_cycles(임계 ply).
+- **성분별 부호 보존이 필수**: 초기 설계였던 FI=1/R(Tsai-Wu) 기반은 FI가 항상 양수라
+  **부호가 소실**되어 완전반복(R=−1, 가장 가혹)이 진폭 0 → '무한수명'으로 뒤집혔다
+  (적대 검증 FAT-01, 최악의 비보수). 따라서 재료축 σ1·σ2·τ12 각각에서
+  σ_a=(σ_max−σ_min)/2, σ_m=(σ_max+σ_min)/2 를 부호와 함께 구하고,
+  성분·부호에 맞는 강도로 정규화한 뒤 **표준 Goodman**(인장 평균만 감산) → S-N.
+- log_linear: N = 10^((1−r_ar)/k) [CFRP 관례 k≈0.1] · basquin: N = r_ar^(−1/b) [금속].
+  N_CAP은 거듭제곱 **전에** 지수 한계로 적용(작은 k에서 OverflowError 차단).
+- ply×3점×3성분 중 최소 수명이 ply 대표, 전 ply 최소가 life_cycles. 지배 성분 병기.
+- 사이클 입력은 두 인자의 **순서에 무관**(성분별로 max/min 정렬), 압축 전용 사이클도 표현 가능.
+  strength/fatigue 없는 ply는 제외하고 **W120으로 경고**(임계 ply가 빠지면 과대평가).
 - 한계 명시: 등진폭·비례하중, 층간/박리 피로·잔류강도 저하·하중 순서·환경 효과 미포함.
 - 검증: Goodman 손계산, log-linear/basquin 역산, 평균응력 효과(같은 진폭에서 평균↑ ⇒ 수명↓),
   진폭 0 ⇒ 무한, 정적 FPF와 FI 정합.

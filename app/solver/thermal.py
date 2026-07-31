@@ -17,18 +17,24 @@ def alpha_vector(alpha1: float, alpha2: float, angle_deg: float) -> np.ndarray:
     ], dtype=np.float64)
 
 
-def thermal_loads(qbars: list[np.ndarray], alphas: list[np.ndarray],
-                  z: np.ndarray, delta_t: float) -> tuple[np.ndarray, np.ndarray]:
-    """N_th = ΔT Σ Q̄α t_k, M_th = ΔT Σ Q̄α z̄_k t_k."""
+def free_strain_loads(qbars: list[np.ndarray], eps_free: list[np.ndarray],
+                      z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """자유변형(열 αΔT + 흡습 βΔc)의 등가 하중: N = ΣQ̄ε_f t_k, M = ΣQ̄ε_f z̄_k t_k (§17.5.4)."""
     N = np.zeros(3)
     M = np.zeros(3)
-    for k, (qb, a) in enumerate(zip(qbars, alphas)):
+    for k, (qb, e) in enumerate(zip(qbars, eps_free)):
         t_k = float(z[k + 1] - z[k])
         zbar = float(z[k + 1] + z[k]) / 2.0
-        qa = qb @ a
-        N += qa * t_k
-        M += qa * zbar * t_k
-    return N * delta_t, M * delta_t
+        qe = qb @ e
+        N += qe * t_k
+        M += qe * zbar * t_k
+    return N, M
+
+
+def thermal_loads(qbars: list[np.ndarray], alphas: list[np.ndarray],
+                  z: np.ndarray, delta_t: float) -> tuple[np.ndarray, np.ndarray]:
+    """N_th = ΔT Σ Q̄α t_k, M_th = ΔT Σ Q̄α z̄_k t_k (free_strain_loads 위임)."""
+    return free_strain_loads(qbars, [a * delta_t for a in alphas], z)
 
 
 def thermal_response(A: np.ndarray, B: np.ndarray, D: np.ndarray,
@@ -37,15 +43,21 @@ def thermal_response(A: np.ndarray, B: np.ndarray, D: np.ndarray,
     return RESP.solve_response(A, B, D, N_th, M_th)
 
 
+def residual_stresses_free(qbars: list[np.ndarray], eps_free: list[np.ndarray],
+                           z: np.ndarray, eps0: np.ndarray, kappa: np.ndarray) -> list[np.ndarray]:
+    """ply 중앙면 잔류응력 σ = Q̄(ε0 + z̄κ − ε_free). 힘 평형(Σσt=0)이 검증 불변식."""
+    out = []
+    for k, (qb, e) in enumerate(zip(qbars, eps_free)):
+        zbar = float(z[k + 1] + z[k]) / 2.0
+        out.append(qb @ (eps0 + zbar * kappa - e))
+    return out
+
+
 def residual_ply_stresses(qbars: list[np.ndarray], alphas: list[np.ndarray],
                           z: np.ndarray, eps0: np.ndarray, kappa: np.ndarray,
                           delta_t: float) -> list[np.ndarray]:
-    """ply 중앙면 잔류응력 σ = Q̄(ε0 + z̄κ − αΔT). 평형(ΣF=ΣM=0)이 검증 불변식."""
-    out = []
-    for k, (qb, a) in enumerate(zip(qbars, alphas)):
-        zbar = float(z[k + 1] + z[k]) / 2.0
-        out.append(qb @ (eps0 + zbar * kappa - a * delta_t))
-    return out
+    """순수 열 잔류응력 (residual_stresses_free 위임 — 기존 API 유지)."""
+    return residual_stresses_free(qbars, [a * delta_t for a in alphas], z, eps0, kappa)
 
 
 def warpage_over_panel(kappa: np.ndarray, lx: float, ly: float) -> dict:

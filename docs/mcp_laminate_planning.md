@@ -847,6 +847,56 @@ call get_reference_cases for worked examples.
 
 ---
 
+## 17.5 V2-2차: 설계규칙·좌굴·진동·진행성 파손·흡습 (2026-07-31 확정 사양, 서버 0.5.0)
+
+전부 데이터 불필요(강도는 진행성만)·폐형해·결정론. Tool 4종 신설 + 열해석 1종 확장 → 총 19종.
+
+### 17.5.1 check_design_rules — 적층 설계 규칙 검사기
+
+업계 표준 규칙을 코드화. 각 규칙은 {rule, severity, pass|not_applicable, found, why_it_matters, fix_hint} 반환.
+
+| rule | severity | 판정 |
+|---|---|---|
+| symmetry | hard | 기하 회문(기존 fingerprint) — 위반 시 coupling_ratio 증거 병기 |
+| balance | hard | 0/90 외 각도의 ±θ 짝 — 각도(tol 0.5°)·두께·재료까지 일치해야 짝. 미짝 ply 나열, A16/A26 병기 |
+| ten_percent | guideline | 쿼드 적층일 때 각 방향 **두께 비율** ≥10% (매수 기준은 두께 불균일에서 오판 — F3). 비쿼드는 not_applicable |
+| contiguity | guideline | 동일 각도 연속 ≤ N매 (기본 4, 파라미터) |
+| adjacent_angle | guideline | 인접 ply 각도차 ≤45° (계면 층간응력 저감 — 0/90 직접 접촉 지적) |
+| outer_protection | guideline | 최외층 ±45 권장 (충격·가공 손상 허용) |
+| single_ply_angle_group | info | 방향별 매수 분포 요약 (판정 아님) |
+
+### 17.5.2 compute_buckling / compute_natural_frequencies — Navier 폐형해
+
+단순지지 직교이방 판(a=Lx, b=Ly), m,n = 1..10 결정론 스캔.
+
+- 좌굴(2축 압축, R = Ny/Nx, 압축 양수): N_cr(m,n) = π²[D11(m/a)⁴+2(D12+2D66)(m/a)²(n/b)²+D22(n/b)⁴] / [(m/a)²+R(n/b)²], 최소값·모드(m,n)·(하중 주면) 여유율. Nxy 미지원(E100). **스캔은 경계 도달 시 배가 확장(상한 160)** — 고정 상한은 장판·직교이방에서 참 최소를 놓쳐 비보수적(적대 검증 NAV-2). 압축 지배 모드가 없으면 E100.
+- 고유진동수: ω²(m,n) = π⁴[D11(m/a)⁴+2(D12+2D66)(m/a)²(n/b)²+D22(n/b)⁴]/ρ_areal, f=ω/2π [Hz]. 전 ply rho 필수. 스캔 = max(10, n_modes) (f는 m·n 단조 증가 — NAV-3).
+- **비대칭 적층은 축소 굽힘강성 D\* = D − B A⁻¹ B 사용** (표준 근사) + W130 경고.
+- D16/D26 유의(비율 > 0.05)면 W130 — Navier는 specially orthotropic 가정이라 비보수적일 수 있음을 명시.
+- 검증 폐형해: 등방 정사각 SS 판 N_cr = 4π²D/b² (D=Eh³/12(1−ν²)), 장판 a/b=2에서 m=2 모드 전환(k=4 유지), 등방 진동 ω = π²[(m/a)²+(n/b)²]√(D/ρ_a).
+
+### 17.5.3 run_progressive_failure — ply discount 진행성 파손
+
+- 하중 패턴 P=(N,M) 고정, 강성 갱신 반복: ① 현 강성으로 단위응답→ply별 bottom/mid/top 3점 응력(중앙만 보면 굽힘에서 파손 누락 — 적대 검증 PROG-2) ② 미파손 ply의 Tsai-Wu R (기지 파손된 ply는 섬유 항만: R=Xt/σ₁ 또는 Xc/|σ₁|) ③ 최소 R에서 사건 기록 ④ 지배 모드별 강성 저하 — 기지/전단 모드: E2,G12,ν12 ×η, 섬유 모드: 전 성분 ×η (ply 사망). η 기본 0.1.
+- 종료: **하중 지지 붕괴(같은 하중의 응답이 초기 10배 초과)** / 전 파손가능 ply 섬유 파손 / K̂ 비양정치 / 파손 가능 ply 없음. 사건 ≤ 2×n_plies (결정론).
+- 스퓨리어스 방지: 응력이 참조 스케일의 1e-6 미만인 지점은 판정 제외 (σ1≈0에서 R~1e18 오염 차단 — PROG-1).
+- 출력: events[{step, ply, mode, R}], **ultimate_R = 붕괴 전까지의 max R (하중 제어 용량)**, last_ply_R, 사건별 유효 Ex 저하 곡선, 종료 사유. strength 없는 ply는 탄성 유지(비파손, note).
+- 한계 명시: 하중 제어 재시작(quasi-static restart) 표준 근사, 열잔류 미중첩(후속).
+
+### 17.5.4 흡습 팽창 — compute_thermal_response 확장
+
+- 재료 선택 필드: `beta`(등방)/`beta1,beta2`(직교) [1/%M], 입력 `delta_C` [%M 변화].
+- 자유변형 ε_free = αΔT + βΔc — 열 기계 그대로 재사용(단일 자유변형 벡터). delta_T·delta_C 중 최소 하나.
+- E203 재사용(detail로 α/β 구분). **등가 검증**: αΔT = βΔc 로 맞춘 두 해석이 동일 κ (바이메탈).
+
+### 17.5.5 검증·경고
+
+- W130 MODEL_APPLICABILITY 신설 — Navier 가정 이탈(비대칭 D\* 사용, D16/D26 유의) 명시용.
+- 신규 few-shot: 등방 정사각 좌굴(4π²D/b² 기대값 내장) 케이스.
+- 구현 후 멀티에이전트 적대 검증(수식 재유도 3렌즈 + 엣지 + 에이전트 UX) 수행.
+
+---
+
 ## 부록 A. 기호표
 
 | 기호 | 의미 | SI 단위 |

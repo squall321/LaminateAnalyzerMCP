@@ -1,6 +1,7 @@
 # 요청 오케스트레이션 — 검증→SI 계산→표시 변환→envelope 조립 (계획서 §6.3, §7.2)
 from __future__ import annotations
 
+import math
 import time
 
 import numpy as np
@@ -496,8 +497,9 @@ def _cte_vectors_or_error(si) -> tuple[list | None, list[dict]]:
     return [TH.alpha_vector(p.alpha1, p.alpha2, p.angle_deg) for p in si.plies], []
 
 
-def run_thermal(payload, delta_t, panel=None, include_debug: bool = False) -> dict:
-    """자유 열변형: 유효 CTE·열곡률·ply 잔류응력·판 휨 (compute_thermal_response Tool, §17.1)."""
+def run_thermal(payload, delta_t=None, panel=None, delta_c=None,
+                include_debug: bool = False) -> dict:
+    """자유 열·흡습 변형: 유효 CTE/CME·곡률·ply 잔류응력·판 휨 (compute_thermal_response, §17.1·§17.5.4)."""
     from app.solver import thermal as TH
     t0 = time.perf_counter()
     si, errors, warnings = VAL.validate_and_convert(payload)
@@ -505,37 +507,63 @@ def run_thermal(payload, delta_t, panel=None, include_debug: bool = False) -> di
         return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
                          unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
                          include_debug=include_debug, t0=t0)
-    if not isinstance(delta_t, (int, float)) or isinstance(delta_t, bool) or delta_t == 0:
-        return ENV.build(data=None, errors=[item("E100", field="delta_T",
-                                                 detail="delta_T는 0이 아닌 숫자 [K]여야 합니다 (T_현재 − T_무응력기준)")],
+
+    def _num(v):
+        return (isinstance(v, (int, float)) and not isinstance(v, bool)
+                and math.isfinite(v))
+    dT = float(delta_t) if _num(delta_t) else (None if delta_t is None else "bad")
+    dC = float(delta_c) if _num(delta_c) else (None if delta_c is None else "bad")
+    if dT == "bad" or dC == "bad" or ((dT in (None, 0.0)) and (dC in (None, 0.0))):
+        return ENV.build(data=None, errors=[item("E100", field="delta_T/delta_C",
+                                                 detail="delta_T [K] 또는 delta_C [%M] 중 최소 하나는 0이 아닌 숫자여야 합니다")],
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
+    dT = dT or 0.0
+    dC = dC or 0.0
     if panel is not None:
-        if not (isinstance(panel, dict)
-                and all(isinstance(panel.get(k), (int, float)) and not isinstance(panel.get(k), bool)
-                        and panel.get(k) > 0 for k in ("Lx", "Ly"))):
+        if _panel_to_si(panel, si.unit_system)[0] is None:
             return ENV.build(data=None, errors=[item("E100", field="panel",
-                                                     detail="panel은 {\"Lx\": >0, \"Ly\": >0} (길이 단위) 여야 합니다")],
+                                                     detail="panel은 {\"Lx\": >0, \"Ly\": >0} (유한 양수, 길이 단위) 여야 합니다")],
                              warnings=warnings, payload=payload, unit_system=si.unit_system,
                              include_debug=include_debug, t0=t0)
 
-    alphas, cte_err = _cte_vectors_or_error(si)
-    if cte_err:
-        return ENV.build(data=None, errors=cte_err, warnings=warnings, payload=payload,
-                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+    # 자유변형 벡터 = αΔT + βΔc (필요 물성 검사, §17.5.4)
+    if dT != 0.0:
+        missing = [k for k, p_ in enumerate(si.plies) if not p_.has_cte]
+        if missing:
+            return ENV.build(data=None, errors=[item("E203", field="laminae",
+                                                     detail=f"laminae{missing} 에 CTE(alpha)가 없습니다 (delta_T 해석)")],
+                             warnings=warnings, payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+    if dC != 0.0:
+        missing = [k for k, p_ in enumerate(si.plies) if not p_.has_cme]
+        if missing:
+            return ENV.build(data=None, errors=[item("E203", field="laminae",
+                                                     detail=f"laminae{missing} 에 CME(beta)가 없습니다 (delta_C 해석)")],
+                             warnings=warnings, payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+    eps_free = []
+    for p_ in si.plies:
+        e = np.zeros(3)
+        if dT != 0.0:
+            e = e + TH.alpha_vector(p_.alpha1, p_.alpha2, p_.angle_deg) * dT
+        if dC != 0.0:
+            e = e + TH.alpha_vector(p_.beta1, p_.beta2, p_.angle_deg) * dC
+        eps_free.append(e)
 
     A, B, D, z, h = _abd_of_plies(si.plies)
-    qbars = [MAT.qbar_matrix(MAT.q_matrix(p.E1, p.E2, p.G12, p.nu12), p.angle_deg) for p in si.plies]
-    N_th, M_th = TH.thermal_loads(qbars, alphas, z, float(delta_t))
+    qbars = [MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
+             for p_ in si.plies]
+    N_f, M_f = TH.free_strain_loads(qbars, eps_free, z)
     try:
-        eps0, kappa = TH.thermal_response(A, B, D, N_th, M_th)
+        eps0, kappa = TH.thermal_response(A, B, D, N_f, M_f)
     except RESP.SingularSystemError:
         return ENV.build(data=None, errors=[item("E400", field="laminate")], warnings=warnings,
                          payload=payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
 
     f = units.FROM_SI[si.unit_system]
-    sig = TH.residual_ply_stresses(qbars, alphas, z, eps0, kappa, float(delta_t))
-    per_ply = [{"ply": k, "sigma_xyz": (s * f["modulus"]).tolist()} for k, s in enumerate(sig)]
+    sig = TH.residual_stresses_free(qbars, eps_free, z, eps0, kappa)
+    per_ply = [{"ply": k, "sigma_xyz": (s_ * f["modulus"]).tolist()} for k, s_ in enumerate(sig)]
     worst = max(range(len(sig)), key=lambda k: float(np.max(np.abs(sig[k]))))
     trunc_note = None
     if len(per_ply) > config.SUMMARY_PLY_LIMIT:
@@ -545,24 +573,34 @@ def run_thermal(payload, delta_t, panel=None, include_debug: bool = False) -> di
                       f"max_abs는 전체 기준")
 
     data: dict = {
-        "effective_cte": {
-            "alpha_x": float(eps0[0] / delta_t), "alpha_y": float(eps0[1] / delta_t),
-            "alpha_xy": float(eps0[2] / delta_t),
-            "definition": "자유 열변형 막변형률/ΔT [1/K] (비대칭이면 곡률 커플링 포함 유효값)",
-        },
         "response": {
-            "delta_T": float(delta_t),
+            "delta_T": dT if dT != 0.0 else None,
+            "delta_C": dC if dC != 0.0 else None,
             "epsilon0": eps0.tolist(),
             "kappa": (kappa * f["kappa"]).tolist(),
-            "kappa_per_K": (kappa * f["kappa"] / delta_t).tolist(),
         },
         "residual_stress": {
-            "note": "ply 중앙면 값 σ = Q̄(ε0+z̄κ−αΔT). 힘 평형(Σσt=0)은 엔진 불변식",
+            "note": "ply 중앙면 값 σ = Q̄(ε0+z̄κ−ε_free). 힘 평형(Σσt=0)은 엔진 불변식",
             "per_ply": per_ply,
             **({"truncation": trunc_note} if trunc_note else {}),
             "max_abs": {"ply": worst, "value": float(np.max(np.abs(sig[worst])) * f["modulus"])},
         },
     }
+    if dT != 0.0 and dC == 0.0:
+        data["effective_cte"] = {
+            "alpha_x": float(eps0[0] / dT), "alpha_y": float(eps0[1] / dT),
+            "alpha_xy": float(eps0[2] / dT),
+            "definition": "자유 열변형 막변형률/ΔT [1/K] (비대칭이면 곡률 커플링 포함 유효값)",
+        }
+        data["response"]["kappa_per_K"] = (kappa * f["kappa"] / dT).tolist()
+    elif dC != 0.0 and dT == 0.0:
+        data["effective_cme"] = {
+            "beta_x": float(eps0[0] / dC), "beta_y": float(eps0[1] / dC),
+            "beta_xy": float(eps0[2] / dC),
+            "definition": "자유 흡습변형 막변형률/Δc [1/%M]",
+        }
+    else:
+        data["note"] = "열+흡습 동시 — 유효 계수는 분리 호출로 산출 (총 응답만 반환)"
     if panel is not None:
         lx_si = panel["Lx"] * units.TO_SI[si.unit_system]["length"]
         ly_si = panel["Ly"] * units.TO_SI[si.unit_system]["length"]
@@ -574,11 +612,11 @@ def run_thermal(payload, delta_t, panel=None, include_debug: bool = False) -> di
         }
 
     extra = [
-        "열해석 가정: 선형 CTE(온도 무관 — FR-4 등은 Tg 이상에서 α 급변, 미반영)",
-        "delta_T = T_현재 − T_무응력기준(경화/리플로우 기준온도), 자유 경계·소변형",
+        "자유변형 해석 가정: 선형 CTE/CME(온도·수분 무관 — Tg 이상 α 급변 미반영), 자유 경계·소변형",
+        "delta_T = T_현재 − T_무응력기준, delta_C = 수분함량 변화 [%M]",
         *_source_assumptions(si),
     ]
-    hash_payload = {"laminate": payload, "delta_T": delta_t, "panel": panel}
+    hash_payload = {"laminate": payload, "delta_T": delta_t, "delta_C": delta_c, "panel": panel}
     if ENV.contains_nan_inf(data):
         return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warnings,
                          payload=hash_payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
@@ -872,4 +910,242 @@ def run_ply_stresses(payload, loads=None, delta_t=None, detail: str = "auto",
                          payload=hash_payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
     return ENV.build(data=data, errors=[], warnings=warnings, payload=hash_payload,
                      unit_system=si.unit_system, assumptions_extra=extra,
+                     include_debug=include_debug, t0=t0)
+
+
+# ── V2-2차: 설계규칙 / 좌굴 / 진동 / 진행성 파손 (계획서 §17.5) ─────────────
+
+
+def _bending_stiffness_for_navier(si, warnings) -> tuple:
+    """(D_used, 사용정보) — 비대칭이면 D* = D − B A⁻¹ B + W130, D16/D26 유의 시 W130 (§17.5.2)."""
+    from app.solver import plate_navier as NAV
+    A, B, D, z, h = _abd_of_plies(si.plies)
+    A_hat, B_hat, D_hat, K_hat = ABD.normalized_stiffness(A, B, D, h)
+    reduced = False
+    D_use = D
+    if float(np.linalg.norm(B_hat)) > 1e-6 * float(np.linalg.norm(A_hat)):
+        D_use = NAV.reduced_bending_stiffness(A, B, D)
+        reduced = True
+        warnings.append(item("W130", field="laminate",
+                             detail="비대칭 적층 — 축소 굽힘강성 D* = D − B·A⁻¹·B 근사 사용"))
+    bt = NAV.bend_twist_significance(D_use)
+    if bt > 0.05:
+        warnings.append(item("W130", field="laminate",
+                             detail=f"굽힘-비틀림 커플링 유의 (max|D16,D26|/√(D11·D22) = {bt:.3g}) — "
+                                    f"Navier(specially orthotropic) 해는 비보수적일 수 있음"))
+    return D_use, {"reduced_stiffness_used": reduced, "bend_twist_ratio": bt}, h, K_hat
+
+
+def _panel_to_si(panel, us):
+    """panel {"Lx","Ly"} → SI 길이. 형식·유한성·양수 위반 시 (None, None) (EDGE-01)."""
+    if not (isinstance(panel, dict)
+            and all(isinstance(panel.get(k), (int, float)) and not isinstance(panel.get(k), bool)
+                    and math.isfinite(panel.get(k)) and panel.get(k) > 0 for k in ("Lx", "Ly"))):
+        return None, None
+    f_len = units.TO_SI[us]["length"]
+    return panel["Lx"] * f_len, panel["Ly"] * f_len
+
+
+def run_design_rules(payload, contiguity_limit: int = 4, include_debug: bool = False) -> dict:
+    """적층 설계 규칙 검사 (check_design_rules Tool, §17.5.1)."""
+    from app.solver import design_rules as DR
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    if not isinstance(contiguity_limit, int) or isinstance(contiguity_limit, bool) or contiguity_limit < 1:
+        return ENV.build(data=None, errors=[item("E100", field="contiguity_limit",
+                                                 detail="contiguity_limit는 1 이상 정수여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    A, B, D, z, h = _abd_of_plies(si.plies)
+    A_hat, B_hat, D_hat, _ = ABD.normalized_stiffness(A, B, D, h)
+    nA, nB, nD = (float(np.linalg.norm(m)) for m in (A_hat, B_hat, D_hat))
+    cr = nB / np.sqrt(nA * nD) if nA * nD > 0 else None
+    a16 = max(abs(A_hat[0, 2]), abs(A_hat[1, 2])) / np.sqrt(A_hat[0, 0] * A_hat[1, 1]) \
+        if A_hat[0, 0] * A_hat[1, 1] > 0 else None
+
+    rules = DR.check_rules(si.plies, si.fingerprint, cr, a16, contiguity_limit)
+    judged = [r for r in rules if r["pass"] is not None]
+    data = {
+        "rules": rules,
+        "summary": {
+            "n_pass": sum(1 for r in judged if r["pass"]),
+            "n_fail": sum(1 for r in judged if not r["pass"]),
+            "hard_fails": [r["rule"] for r in judged if not r["pass"] and r["severity"] == "hard"],
+        },
+    }
+    return ENV.build(data=data, errors=[], warnings=warnings, payload={"laminate": payload,
+                                                                      "contiguity_limit": contiguity_limit},
+                     unit_system=si.unit_system,
+                     assumptions_extra=["설계 규칙은 업계 관례 휴리스틱 — 위반이 곧 불합격은 아니며 근거와 함께 검토용"],
+                     include_debug=include_debug, t0=t0)
+
+
+def run_buckling(payload, panel, load_ratio: float = 0.0, applied_Nx=None,
+                 include_debug: bool = False) -> dict:
+    """단순지지 직교이방 판 좌굴 임계 (compute_buckling Tool, §17.5.2)."""
+    from app.solver import plate_navier as NAV
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    a, b = _panel_to_si(panel, si.unit_system)
+    if a is None:
+        return ENV.build(data=None, errors=[item("E100", field="panel",
+                                                 detail="panel은 {\"Lx\": >0, \"Ly\": >0} (길이 단위) 여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    if (not isinstance(load_ratio, (int, float)) or isinstance(load_ratio, bool)
+            or not math.isfinite(load_ratio)):
+        return ENV.build(data=None, errors=[item("E100", field="load_ratio",
+                                                 detail="load_ratio = Ny/Nx 는 유한한 숫자여야 합니다 (압축 양수)")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    if applied_Nx is not None and (not isinstance(applied_Nx, (int, float))
+                                   or isinstance(applied_Nx, bool)
+                                   or not math.isfinite(applied_Nx) or applied_Nx <= 0):
+        return ENV.build(data=None, errors=[item("E100", field="applied_Nx",
+                                                 detail="applied_Nx는 압축 크기(양수)여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    D_use, appl, h, _ = _bending_stiffness_for_navier(si, warnings)
+    res = NAV.buckling_ncr(D_use, a, b, float(load_ratio))
+    if res["N_cr"] is None:
+        # 압축 지배 모드가 없음(과도한 음수 load_ratio) — 내부 오류가 아니라 입력 문제 (NAV-1)
+        return ENV.build(data=None, errors=[item("E100", field="load_ratio",
+                                                 detail=f"load_ratio={load_ratio}에서는 {res['reason']}. "
+                                                        f"압축을 양수로 하는 Ny/Nx 값을 확인하세요")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    if res.get("boundary"):
+        warnings.append(item("W130", field="buckling.mode",
+                             detail=f"임계 모드가 스캔 상한({res['mode_scan']})에 걸렸습니다 — "
+                                    f"N_cr이 비보수적으로 과대평가되었을 수 있습니다"))
+    f = units.FROM_SI[si.unit_system]
+    data = {
+        "N_cr": res["N_cr"] * f["A"],
+        "mode": {"m": res["mode_m"], "n": res["mode_n"], "scan_limit": res["mode_scan"],
+                 "at_scan_boundary": bool(res.get("boundary"))},
+        "load_ratio_Ny_over_Nx": float(load_ratio),
+        "applicability": appl,
+        "definition": "SS 4변, N_cr(m,n)=π²[D11(m/a)⁴+2(D12+2D66)(m/a)²(n/b)²+D22(n/b)⁴]/[(m/a)²+R(n/b)²] 최소. 압축 양수, Nxy 미지원",
+    }
+    if applied_Nx is not None:
+        data["margin"] = {"applied_Nx": applied_Nx, "factor": data["N_cr"] / applied_Nx,
+                          "meaning": "factor>1 이면 좌굴 전 (임계/작용)"}
+    hash_payload = {"laminate": payload, "panel": panel, "load_ratio": load_ratio, "applied_Nx": applied_Nx}
+    return ENV.build(data=data, errors=[], warnings=warnings, payload=hash_payload,
+                     unit_system=si.unit_system,
+                     assumptions_extra=["좌굴: 4변 단순지지·specially orthotropic Navier 폐형해, 전단하중(Nxy) 미포함"],
+                     include_debug=include_debug, t0=t0)
+
+
+def run_frequencies(payload, panel, n_modes: int = 5, include_debug: bool = False) -> dict:
+    """단순지지 직교이방 판 고유진동수 (compute_natural_frequencies Tool, §17.5.2)."""
+    from app.solver import plate_navier as NAV
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    a, b = _panel_to_si(panel, si.unit_system)
+    if a is None:
+        return ENV.build(data=None, errors=[item("E100", field="panel",
+                                                 detail="panel은 {\"Lx\": >0, \"Ly\": >0} (길이 단위) 여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    if not isinstance(n_modes, int) or isinstance(n_modes, bool) or not (1 <= n_modes <= 25):
+        return ENV.build(data=None, errors=[item("E100", field="n_modes",
+                                                 detail="n_modes는 1..25 정수여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    missing_rho = [k for k, p_ in enumerate(si.plies) if p_.rho is None]
+    if missing_rho:
+        return ENV.build(data=None, errors=[item("E100", field="laminae",
+                                                 detail=f"고유진동수에는 전 ply 밀도(rho)가 필요합니다 — laminae{missing_rho} 누락")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    D_use, appl, h, _ = _bending_stiffness_for_navier(si, warnings)
+    rho_areal = sum(p_.rho * p_.thickness for p_ in si.plies)   # SI kg/m²
+    scan = max(NAV.MODE_SCAN, n_modes)      # f는 m·n 단조 증가 → scan ≥ n_modes면 상위 정확 (NAV-3)
+    modes = NAV.natural_frequencies(D_use, rho_areal, a, b, n_modes, mode_scan=scan)
+    data = {
+        "modes": modes,                       # f_hz는 단위계 무관 [Hz]
+        "scan_limit": scan,
+        "rho_areal": rho_areal * units.FROM_SI[si.unit_system]["areal_mass"],
+        "applicability": appl,
+        "definition": "SS 4변, ω²=π⁴·navier(m,n)/ρ_areal, f [Hz]. 감쇠·부가질량 미포함",
+    }
+    hash_payload = {"laminate": payload, "panel": panel, "n_modes": n_modes}
+    return ENV.build(data=data, errors=[], warnings=warnings, payload=hash_payload,
+                     unit_system=si.unit_system,
+                     assumptions_extra=["진동: 4변 단순지지 Navier 폐형해 — 경계·감쇠·공기 부가질량 미반영"],
+                     include_debug=include_debug, t0=t0)
+
+
+def run_progressive(payload, loads, discount: float = 0.1, include_debug: bool = False) -> dict:
+    """ply discount 진행성 파손 — FPF→한계하중 (run_progressive_failure Tool, §17.5.3)."""
+    from app.solver import progressive as PROG
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    N_si, M_si, load_err = _loads_to_si(loads, si.unit_system)
+    if load_err is not None:
+        return ENV.build(data=None, errors=[load_err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+    if not isinstance(discount, (int, float)) or isinstance(discount, bool) or not (0.0 < discount <= 0.5):
+        return ENV.build(data=None, errors=[item("E100", field="discount",
+                                                 detail="discount(강성 잔존율 η)는 (0, 0.5] 실수여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    with_strength = [k for k, p_ in enumerate(si.plies) if p_.strength is not None]
+    if not with_strength:
+        return ENV.build(data=None, errors=[item("E100", field="laminae",
+                                                 detail="strength가 있는 ply가 하나도 없습니다 — material.strength {Xt,Xc,Yt,Yc,S} 필요")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    res = PROG.run(si.plies, N_si, M_si, float(discount))
+    f = units.FROM_SI[si.unit_system]
+    events = res["events"]
+    trunc = None
+    if len(events) > 50:
+        head, tail = events[:25], events[-24:]
+        trunc = f"사건 {len(events)}건 중 처음 25·마지막 24건만 표시 (§6.6)"
+        events = head + tail
+    no_strength = [k for k in range(len(si.plies)) if k not in with_strength]
+    data = {
+        "events": events,
+        **({"truncation": trunc} if trunc else {}),
+        "first_ply_failure_R": res["events"][0]["R"] if res["events"] else None,
+        "ultimate_R": res["ultimate_R"],
+        "last_ply_R": res["last_ply_R"],
+        "ex_eff_after_events": [e * f["modulus"] for e in res["ex_eff_after_events"]],
+        "termination": res["termination"],
+        "meaning": "R = 입력 하중 패턴의 배수. ultimate_R×loads = 하중 제어 용량(최대 지지 하중)",
+    }
+    if no_strength:
+        data["note"] = f"laminae{no_strength}는 strength 미입력 — 탄성 유지(비파손) 가정"
+    hash_payload = {"laminate": payload, "loads": loads, "discount": discount}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warnings,
+                         payload=hash_payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warnings, payload=hash_payload,
+                     unit_system=si.unit_system,
+                     assumptions_extra=[
+                         "진행성 파손: ply discount(하중 제어 quasi-static restart) 표준 근사 — "
+                         f"기지/전단 파손 시 E2·G12·ν12×{discount}, 섬유 파손 시 전 성분×{discount}",
+                         "열잔류응력 미중첩, ply 중앙 응력 기준, Tsai-Wu(첫 파손)+섬유 항(후속) 판정"],
                      include_debug=include_debug, t0=t0)

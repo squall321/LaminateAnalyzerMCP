@@ -1,6 +1,8 @@
 # 내장 기준 케이스 — 에이전트 few-shot 학습·자가 검증용, 기대값은 폐형해 수식으로 산출 (계획서 §6.3, §8.1)
 from __future__ import annotations
 
+import math
+
 _T300_MPA = {"type": "orthotropic_2d", "E1": 181000.0, "E2": 10300.0, "G12": 7170.0,
              "nu12": 0.28, "name": "T300/5208급 흑연/에폭시"}
 
@@ -115,6 +117,41 @@ def _build_cases() -> dict[str, dict]:
             "property": "하중을 N×R로 재호출하면 R≈1 (강도비의 정의)",
         },
         "tolerance": {"note": "모드·ply는 정확 판정, R 수치는 엔진 계산값"},
+    }
+    # R8 — 등방 정사각 판 좌굴 (compute_buckling few-shot, §17.5.2)
+    Eb, nub, tb, Lb = 70000.0, 0.3, 2.0, 200.0
+    Db = Eb * tb**3 / (12.0 * (1.0 - nub * nub))
+    cases["isotropic_square_buckling"] = {
+        "description": "등방 정사각 SS 판(200×200, t=2mm) 단축 압축 — 고전 폐형해 N_cr = 4π²D/b², 모드 (1,1)",
+        "input": {"laminate": {
+            "unit_system": "SI_mm", "name": "isotropic_square_buckling",
+            "laminae": [{"thickness": tb, "angle_deg": 0.0,
+                         "material": {"type": "isotropic", "E": Eb, "nu": nub, "name": "AL6061급"}}]},
+            "tool": "compute_buckling", "panel": {"Lx": Lb, "Ly": Lb}},
+        "expected": {
+            "closed_form": ["N_cr = 4*pi^2*D/b^2, D = E*h^3/(12(1-nu^2))",
+                            "정사각 단축 압축의 좌굴계수 k = 4, 모드 (m,n) = (1,1)"],
+            "N_cr_N_per_mm": 4.0 * math.pi**2 * Db / (Lb * Lb),
+            "mode": [1, 1],
+        },
+        "tolerance": {"rtol": 1e-9},
+    }
+
+    # R9 — 적층 설계 규칙 모범/위반 대조 (check_design_rules few-shot, §17.5.1)
+    cases["design_rules_contrast"] = {
+        "description": "규칙 검사 대조 예시 — good=[45/0/-45/90]s는 전 규칙 통과, bad=[0×5/90]은 대칭·10%·연속·인접각 위반",
+        "input": {"laminate": {
+            "unit_system": "SI_mm", "name": "design_rules_good",
+            "laminae": [{"thickness": t, "angle_deg": a, "material": dict(_T300_MPA)}
+                        for a in (45.0, 0.0, -45.0, 90.0, 90.0, -45.0, 0.0, 45.0)]},
+            "tool": "check_design_rules",
+            "contrast_bad_layup": [0.0, 0.0, 0.0, 0.0, 0.0, 90.0]},
+        "expected": {
+            "good_all_pass": True,
+            "bad_hard_fails_include": ["symmetry"],
+            "note": "guideline 위반은 불합격이 아니라 검토 신호 — found/why_it_matters/fix_hint를 그대로 사용자에게 전달할 것",
+        },
+        "tolerance": {"note": "판정형 케이스 — 수치 허용오차 없음"},
     }
     return cases
 

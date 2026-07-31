@@ -26,6 +26,11 @@ LLM 에이전트가 laminate-analyzer를 (materialtwin과 함께) 쓰는 표준 
 | 후보 N개 탐색 | 후보 생성(에이전트) → `batch_evaluate_laminates(candidates)` → 상위만 `analyze_laminate` |
 | 공차 강건성 | `run_sensitivity_analysis(laminate)` |
 | 보고서 | `generate_design_report(laminate, criteria, language="ko")` → report_markdown 저장 |
+| 적층안 건전성 1차 검토 | `check_design_rules(laminate)` — 대칭·밸런스·10%·인접각·연속·외층 관례 |
+| 층별 응력·파손 | `recover_ply_stresses(laminate, loads, delta_T?)` — strength 있으면 Tsai-Wu R·FPF |
+| 한계하중(첫 파손 이후) | `run_progressive_failure(laminate, loads)` → ultimate_R |
+| 좌굴·공진 | `compute_buckling(laminate, panel, ...)` / `compute_natural_frequencies(laminate, panel)` |
+| 열·흡습 휨 | `compute_thermal_response(laminate, delta_T=, delta_C=, panel=)` (+`homogenize_layer`) |
 
 설계 최적화 루프는 서버가 아니라 **에이전트가 돈다**. 후보를 만들고 batch로 치고 선별을 반복한다.
 
@@ -99,3 +104,28 @@ claude mcp add --transport http laminate-analyzer \
 3. 해석 요령: `initiation_threshold.sigma_critical`(박층일수록↑ — h 절반이면 ×√2),
    Dundurs α>0이면 유연 이웃이라 개구 증폭 경향, `interface_deflection`(Γi/Γℓ<0.25 → 계면에서 저지),
    `viscoelastic.transfer_length_growth`(이완 후 구속 저하 √(E0/E∞)) — 시간·고온에서 차폐가 얼마나 풀리는지
+
+## 8. 스프린트 A 도구 사용 요령 (v0.5.0)
+
+**check_design_rules** — 아이디어 단계의 첫 관문. severity가 `hard`인 위반(대칭·밸런스)은
+설계 결함으로 다루고, `guideline`은 검토 신호로만 다룬다(불합격 아님). 각 항목의
+found/why_it_matters/fix_hint를 그대로 사용자에게 전달하면 근거 있는 설명이 된다.
+`single_ply_angle_group`은 판정이 아니라 방향 분포 요약(info)이다.
+
+**compute_buckling / compute_natural_frequencies** — `panel={"Lx","Ly"}` 필수(길이 단위).
+좌굴은 **압축을 양수**로 보며 `load_ratio = Ny/Nx`, 전단(Nxy)은 미지원(E100).
+`applied_Nx`를 주면 margin.factor = N_cr/Nx. 진동은 **전 ply에 rho** 필요.
+경계조건은 4변 단순지지 고정 — 실제 경계가 고정단이면 보수적(낮게) 나온다.
+응답의 `mode.at_scan_boundary`가 true면 스캔 상한에 걸린 것이니 결과를 과신하지 말 것(W130 동반).
+비대칭 적층은 축소강성 D*로 근사되며 W130이 함께 온다.
+
+**run_progressive_failure** — `ultimate_R`이 핵심: 입력 하중 패턴의 **최대 지지 배수**다
+(loads×ultimate_R = 한계하중). `events`는 사건 순서(ply·모드·R)이고, `termination`이
+`load_carrying_collapse`면 강성 붕괴로 정상 종료된 것이다. 첫 파손의 상세(위치·양 기준)는
+`recover_ply_stresses`로 따로 본다. strength 없는 ply는 탄성 유지(비파손)로 가정된다.
+
+**흡습(delta_C)** — `compute_thermal_response`에 `delta_C` [%M]와 재료 `beta`(또는 beta1/beta2)를
+주면 열과 동일한 기계로 계산된다. ΔT와 ΔC를 함께 주면 총 응답만 반환한다(유효 계수는 분리 호출).
+
+**공통 함정** — 이 도구들은 CLT 기반이라 두꺼운 판·샌드위치 코어(횡전단 지배)에서는 부정확하다.
+응답의 `assumptions`와 W130 경고를 반드시 사용자에게 전달할 것.

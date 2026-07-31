@@ -146,15 +146,16 @@ def generate_design_report(laminate: dict, criteria: dict | None = None,
 
 
 @mcp.tool()
-def compute_thermal_response(laminate: dict, delta_T: float, panel: dict | None = None) -> dict:
-    """온도 변화에 대한 자유 열변형 — 유효 CTE, 열곡률, ply 잔류응력, (panel 주면) 판 휨.
+def compute_thermal_response(laminate: dict, delta_T: float | None = None,
+                             panel: dict | None = None, delta_C: float | None = None) -> dict:
+    """온도(ΔT)·흡습(ΔC) 자유변형 — 유효 CTE/CME, 곡률, ply 잔류응력, (panel 주면) 판 휨.
 
-    각 ply material에 alpha(등방) 또는 alpha1/alpha2(직교이방) [1/K] 필요 (없으면 E203).
-    delta_T = T_현재 − T_무응력기준 [K] (리플로우 가열 +, 경화 후 냉각 −).
-    panel = {"Lx":, "Ly":} (길이 단위) → warpage.range = 판 위 최대−최소 처짐(coplanarity).
+    delta_T [K] 해석엔 ply별 alpha(또는 alpha1/2), delta_C [%M] 해석엔 beta(또는 beta1/2) 필요
+    (없으면 E203). 둘 중 최소 하나. delta_T = T_현재 − T_무응력기준 (리플로우 +, 경화 냉각 −),
+    delta_C = 수분함량 변화 [%M]. panel = {"Lx","Ly"} → warpage.range(coplanarity).
     동박층처럼 혼합층은 먼저 homogenize_layer로 등가 물성을 만들어 넣을 것.
     """
-    return _guarded(PIPE.run_thermal, laminate, delta_t=delta_T, panel=panel)
+    return _guarded(PIPE.run_thermal, laminate, delta_t=delta_T, panel=panel, delta_c=delta_C)
 
 
 @mcp.tool()
@@ -199,6 +200,52 @@ def recover_ply_stresses(laminate: dict, loads: dict | None = None,
     detail: "auto"(기본 — 32ply 초과 시 임계 상위 10개만+truncation note) | "full" | "summary".
     """
     return _guarded(PIPE.run_ply_stresses, laminate, loads=loads, delta_t=delta_T, detail=detail)
+
+
+@mcp.tool()
+def check_design_rules(laminate: dict, contiguity_limit: int = 4) -> dict:
+    """적층 설계 규칙 검사 — 업계 관례(대칭/밸런스/10%/인접각/연속/외층 보호)를 판정한다.
+
+    각 규칙은 {rule, severity(hard|guideline|info), pass, found, why_it_matters, fix_hint}로
+    반환되어, 위반 사실뿐 아니라 물리적 이유와 수정 방향까지 설명 가능하다. 물성 데이터 불필요.
+    적층안 아이디어를 낼 때 analyze_laminate와 함께 첫 검토 단계로 사용할 것.
+    """
+    return _guarded(PIPE.run_design_rules, laminate, contiguity_limit=contiguity_limit)
+
+
+@mcp.tool()
+def compute_buckling(laminate: dict, panel: dict, load_ratio: float = 0.0,
+                     applied_Nx: float | None = None) -> dict:
+    """단순지지 직교이방 판의 좌굴 임계하중 N_cr (Navier 폐형해, m·n=1..10 스캔).
+
+    panel = {"Lx","Ly"} (길이 단위). 2축 압축 지원: load_ratio = Ny/Nx (압축 양수), Nxy 미지원.
+    applied_Nx(압축 크기)를 주면 margin.factor = N_cr/Nx. 비대칭 적층은 축소강성 D*로 근사(W130),
+    D16/D26 유의 시 비보수 가능성 경고(W130). 경량화 탐색의 두께 하한 판단용.
+    """
+    return _guarded(PIPE.run_buckling, laminate, panel=panel, load_ratio=load_ratio,
+                    applied_Nx=applied_Nx)
+
+
+@mcp.tool()
+def compute_natural_frequencies(laminate: dict, panel: dict, n_modes: int = 5) -> dict:
+    """단순지지 직교이방 판의 고유진동수 [Hz] (Navier 폐형해, 낮은 순 n_modes개).
+
+    전 ply에 밀도(rho)가 필요하다. panel = {"Lx","Ly"}. NVH·공진 회피 1차 판단용.
+    비대칭 D* 근사·D16/D26 유의성은 W130으로 경고. 경계조건은 4변 단순지지 고정.
+    """
+    return _guarded(PIPE.run_frequencies, laminate, panel=panel, n_modes=n_modes)
+
+
+@mcp.tool()
+def run_progressive_failure(laminate: dict, loads: dict, discount: float = 0.1) -> dict:
+    """진행성 파손(ply discount) — FPF 이후 강성 저하를 반복해 한계하중까지 추적한다.
+
+    loads = {"N":[...], "M":[...]} 하중 패턴. 반환: events(사건별 ply·모드·R),
+    first_ply_failure_R, **ultimate_R(하중 제어 용량 = 최대 지지 배수)**, last_ply_R,
+    사건별 유효 Ex 저하 곡선, 종료 사유. discount = 파손 ply 강성 잔존율 η (기본 0.1).
+    strength 없는 ply는 탄성 유지. FPF 상세(위치·양기준)는 recover_ply_stresses 사용.
+    """
+    return _guarded(PIPE.run_progressive, laminate, loads=loads, discount=discount)
 
 
 @mcp.tool()
@@ -260,6 +307,10 @@ def guide() -> str:
    Dundurs 차폐 경향, 계면 편향(1/4 법칙), 보호층 점탄성 이완의 차폐 저하.
 10) 층별 응력·파손: recover_ply_stresses(laminate, loads, delta_T?) — ply별 σ1/σ2/τ12와
     (strength 있으면) Tsai-Wu 여유율 R·지배 모드·first_ply_failure. 강도는 materialtwin에서.
+11) 설계규칙: check_design_rules — 대칭/밸런스/10%/인접각/연속/외층 관례 판정+이유+수정힌트.
+12) 좌굴/진동: compute_buckling·compute_natural_frequencies(panel 필수, SS Navier 폐형해).
+13) 한계하중: run_progressive_failure — FPF 이후 ply discount로 ultimate_R까지.
+14) 흡습: compute_thermal_response에 delta_C [%M] (재료 beta 필요) — 열과 동일 기계.
 
 ## materialtwin 연계 (물성을 모를 때)
 - materialtwin MCP의 list_materials/search_by_property → get_material에서 실측 E를 얻는다.

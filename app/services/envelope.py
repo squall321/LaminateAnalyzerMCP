@@ -12,7 +12,7 @@ from app import config, units
 BASE_ASSUMPTIONS = [
     "고전 적층판 이론(CLT, Kirchhoff-Love): 횡전단 변형 무시 — 두꺼운 판·샌드위치 코어에는 부정확",
     "평면응력 선형탄성, 완전 접착(층간 슬립 없음), 층 두께 균일",
-    "열·흡습 잔류변형 미포함 (V2 예정)",
+    "열·흡습 잔류변형은 delta_T/delta_C를 준 해석에서만 반영됨 (미지정이면 기계 하중만)",
     "N·M은 단위 폭당 물리량 (SI: N/m, N·m/m)",
 ]
 

@@ -34,7 +34,8 @@
 - [x] 크랙 차폐: assess_crack_shielding (터널 G_ss·σ_c·Dundurs·He-Hutchinson 1/4·shear-lag·점탄성 이완) + material.viscoelastic
 - [x] 검증: Timoshenko 바이메탈 rel 1e-6, 평형 불변식, Griffith 항등, 단위 브리지 — 테스트 122종 전부 통과
 - [x] mcp<2 핀 (2.0이 FastMCP 제거 — materialtwin과 동일 결정), venv 재생성
-- [ ] **라이브 반영 = GitHub push (사람 액션)** — 배포가 git source(SIF)로 전환되어 push 후 스캐너 자동 재빌드·게이트웨이 반영
+- [x] ~~라이브 반영~~ — **push 완료(2026-07-31)**: v0.4.1 SIF 재빌드·재기동(/health 0.4.1), 게이트웨이 재기동으로 신규 4종 노출(188 도구). 카탈로그 라벨 0.4.1 동기화(HEAXHub 커밋)
+- [ ] (포털 백로그 G3) 게이트웨이: 기존 백엔드 인스턴스 교체 시 도구 목록 재집계 안 됨 — 세션은 재연결되나 신규 도구는 게이트웨이 재기동 전까지 미노출 (이번에 실측)
 - [x] 층별 기계 응력 복원 + 파손 판정 — recover_ply_stresses (v0.4.0): σ_xyz/σ1σ2τ12 3점 복원, Tsai-Wu R·Max Stress 모드·FPF, ΔT 중첩. [0/90]s FPF=90°횡인장·하중×R→R=1 검증, 테스트 132
 - [ ] 다음 물리 확장: 좌굴, check_design_rules, 층간(ILSS)
 

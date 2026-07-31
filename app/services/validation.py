@@ -32,6 +32,11 @@ class SiPly:
     ve_Einf: float | None = None
     ve_tau_s: float | None = None
     strength: tuple | None = None  # (Xt,Xc,Yt,Yc,S) Pa (파손 판정, §17.4 선택)
+    g13: float | None = None       # Pa (횡전단, §17.6 선택 — 미지정 시 G12 대체)
+    g23: float | None = None
+    g_transverse_assumed: bool = False   # G12로 대체했는지 (가정 표기용)
+    ilss: float | None = None      # Pa (층간 전단강도)
+    loss_factor: float | None = None
 
     @property
     def has_cte(self) -> bool:
@@ -149,6 +154,16 @@ def validate_and_convert(payload) -> tuple[SiLaminate | None, list[dict], list[d
             is_iso = False
 
         # W110 단위 오입력 휴리스틱 (원시 입력값 기준, 계획서 §6.4)
+        # 응력 차원 선택 필드도 함께 검사 (UNITS-01: G13/ilss 등이 무경고로 통과하던 사각지대)
+        for _n in ("G13", "G23", "ilss"):
+            _v = getattr(m, _n, None)
+            if isinstance(_v, (int, float)) and _v > 0:
+                raw_moduli[_n] = _v
+        if m.strength is not None:
+            for _n in ("Xt", "Xc", "Yt", "Yc", "S"):
+                raw_moduli[f"strength.{_n}"] = getattr(m.strength, _n)
+        if m.viscoelastic is not None:
+            raw_moduli["viscoelastic.E0"] = m.viscoelastic.E0
         for n, v in raw_moduli.items():
             if v > 0:
                 if us == "SI" and config.SI_MODULUS_SUSPECT_LOW <= v < config.SI_MODULUS_SUSPECT_HIGH:
@@ -200,6 +215,15 @@ def validate_and_convert(payload) -> tuple[SiLaminate | None, list[dict], list[d
             errors.append(item("E100", field=f"{base}.material.viscoelastic",
                                detail=f"{base}: Einf({ve.Einf}) > E0({ve.E0}) — 이완 특성은 Einf <= E0 이어야 합니다"))
 
+        # 횡전단 (§17.6) — 미지정이면 면내 G12로 근사(가정 표기)
+        if m.type == "isotropic":
+            g13_si = g23_si = G12          # 등방은 G13=G23=G (근사 아님)
+            g_assumed = False
+        else:
+            g13_si = m.G13 * f["modulus"] if m.G13 is not None else G12
+            g23_si = m.G23 * f["modulus"] if m.G23 is not None else G12
+            g_assumed = m.G13 is None or m.G23 is None
+
         angle_norm = MAT.normalize_angle_deg(lam.angle_deg) if abs(lam.angle_deg) < 360.0 else 0.0
         rho_si = m.rho * f["density"] if m.rho is not None else None
         plies.append(SiPly(lam.thickness * f["length"], angle_norm, E1, E2, G12, nu12,
@@ -210,7 +234,10 @@ def validate_and_convert(payload) -> tuple[SiLaminate | None, list[dict], list[d
                            ve_tau_s=ve.tau_s if ve else None,
                            strength=(tuple(getattr(m.strength, k) * f["modulus"]
                                            for k in ("Xt", "Xc", "Yt", "Yc", "S"))
-                                     if m.strength is not None else None)))
+                                     if m.strength is not None else None),
+                           g13=g13_si, g23=g23_si, g_transverse_assumed=g_assumed,
+                           ilss=(m.ilss * f["modulus"] if m.ilss is not None else None),
+                           loss_factor=m.loss_factor))
         fingerprint.append((lam.thickness, angle_norm, E1, E2, G12, nu12, rho_si, a1, a2))
 
     if errors:

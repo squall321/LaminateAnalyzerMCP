@@ -40,6 +40,8 @@ class IsotropicMaterial(BaseModel):
     rho: float | None = Field(default=None, gt=0, description="밀도 (SI: kg/m^3, SI_mm: t/mm^3). 질량 지표 계산 시에만 필요")
     alpha: float | None = Field(default=None, description="열팽창계수 [1/K] (열해석 시 필요. ppm/K 아님 — 예: 구리 17e-6)")
     beta: float | None = Field(default=None, description="흡습팽창계수 [1/%M] (delta_C 해석 시 필요. 예: 에폭시 ~3e-3)")
+    ilss: float | None = Field(default=None, gt=0, description="층간 전단강도 [응력 단위] (층간 여유율 판정 시)")
+    loss_factor: float | None = Field(default=None, ge=0, description="재료 손실계수 η (모달 감쇠 산출 시). 금속 ~1e-4, 에폭시 ~0.01, 점탄성 PSA ~0.5")
     viscoelastic: Viscoelastic | None = None
     strength: Strength | None = None
     name: str | None = Field(default=None, description="재료 라벨 (추적용)")
@@ -58,6 +60,10 @@ class Orthotropic2DMaterial(BaseModel):
     alpha2: float | None = Field(default=None, description="횡방향 CTE [1/K]")
     beta1: float | None = Field(default=None, description="섬유 방향 흡습팽창계수 [1/%M] (보통 ≈0)")
     beta2: float | None = Field(default=None, description="횡방향 흡습팽창계수 [1/%M]")
+    G13: float | None = Field(default=None, gt=0, description="횡전단 탄성계수 G13 (미지정 시 G12로 근사)")
+    G23: float | None = Field(default=None, gt=0, description="횡전단 탄성계수 G23 (미지정 시 G12로 근사 — 실제는 더 작음)")
+    ilss: float | None = Field(default=None, gt=0, description="층간 전단강도 [응력 단위] (층간 여유율 판정 시)")
+    loss_factor: float | None = Field(default=None, ge=0, description="재료 손실계수 η (모달 감쇠 산출 시)")
     viscoelastic: Viscoelastic | None = None
     strength: Strength | None = None
     name: str | None = Field(default=None, description="재료 라벨 (추적용)")

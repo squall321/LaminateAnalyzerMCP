@@ -221,6 +221,7 @@ def compute_buckling(laminate: dict, panel: dict, load_ratio: float = 0.0,
     panel = {"Lx","Ly"} (길이 단위). 2축 압축 지원: load_ratio = Ny/Nx (압축 양수), Nxy 미지원.
     applied_Nx(압축 크기)를 주면 margin.factor = N_cr/Nx. 비대칭 적층은 축소강성 D*로 근사(W130),
     D16/D26 유의 시 비보수 가능성 경고(W130). 경량화 탐색의 두께 하한 판단용.
+    횡전단 유연성이 유의하면(R_s>0.02) corrected_N_cr(1차 FSDT 보정)을 함께 반환한다.
     """
     return _guarded(PIPE.run_buckling, laminate, panel=panel, load_ratio=load_ratio,
                     applied_Nx=applied_Nx)
@@ -231,6 +232,9 @@ def compute_natural_frequencies(laminate: dict, panel: dict, n_modes: int = 5) -
     """단순지지 직교이방 판의 고유진동수 [Hz] (Navier 폐형해, 낮은 순 n_modes개).
 
     전 ply에 밀도(rho)가 필요하다. panel = {"Lx","Ly"}. NVH·공진 회피 1차 판단용.
+    전 ply에 loss_factor(η)가 있으면 모달 감쇠(MSE법)와 Q factor를 함께 반환한다.
+    횡전단 유연성 R_s = π²D11/(A55a²)도 함께 계산 — 0.02 초과면 CLT가 비보수적이므로
+    W130과 1차 보정값(corrected_f1_hz)을 병기한다(두꺼운 판·샌드위치 판단 근거).
     비대칭 D* 근사·D16/D26 유의성은 W130으로 경고. 경계조건은 4변 단순지지 고정.
     """
     return _guarded(PIPE.run_frequencies, laminate, panel=panel, n_modes=n_modes)
@@ -246,6 +250,20 @@ def run_progressive_failure(laminate: dict, loads: dict, discount: float = 0.1) 
     strength 없는 ply는 탄성 유지. FPF 상세(위치·양기준)는 recover_ply_stresses 사용.
     """
     return _guarded(PIPE.run_progressive, laminate, loads=loads, discount=discount)
+
+
+@mcp.tool()
+def compute_interlaminar_stresses(laminate: dict, shear: dict, detail: str = "auto") -> dict:
+    """층간 전단응력 τxz·τyz 분포와 ILSS 여유 — 박리(delamination) 위험 판단.
+
+    shear = {"Vx": , "Vy": } 단위 폭당 횡전단력(굽힘 모멘트의 공간 구배 = 전단력;
+    SI: N/m, SI_mm: N/mm). CLT가 직접 주지 않는 τxz를 3D 평형식으로 사후 복원한다
+    (등방 단일층이면 τmax = 1.5V/h 포물선, 상하 자유표면 0).
+    material.ilss(층간 전단강도)가 있으면 계면별 margin = ILSS/|τ| (1 미만이면 박리 예상).
+    자유단 박리는 정성 순위(free_edge_risk_ranking)로만 제공 — 정량은 3D 해석 필요(W130).
+    detail: "auto"(기본 — 두꺼운 적층은 |τ| 상위 점만) | "full"(전 프로파일).
+    """
+    return _guarded(PIPE.run_interlaminar, laminate, shear=shear, detail=detail)
 
 
 @mcp.tool()
@@ -311,6 +329,9 @@ def guide() -> str:
 12) 좌굴/진동: compute_buckling·compute_natural_frequencies(panel 필수, SS Navier 폐형해).
 13) 한계하중: run_progressive_failure — FPF 이후 ply discount로 ultimate_R까지.
 14) 흡습: compute_thermal_response에 delta_C [%M] (재료 beta 필요) — 열과 동일 기계.
+15) 층간·박리: compute_interlaminar_stresses(laminate, shear={"Vx","Vy"}) — τxz 분포·ILSS 여유.
+16) 감쇠·두께 한계: compute_natural_frequencies가 loss_factor 있으면 모달 η·Q,
+    G13/G23로 횡전단 유연성 R_s를 계산해 CLT가 부정확해지는 지점을 알려준다.
 
 ## materialtwin 연계 (물성을 모를 때)
 - materialtwin MCP의 list_materials/search_by_property → get_material에서 실측 E를 얻는다.

@@ -1024,6 +1024,9 @@ def run_buckling(payload, panel, load_ratio: float = 0.0, applied_Nx=None,
                                                         f"압축을 양수로 하는 Ny/Nx 값을 확인하세요")],
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
+    # 전단 유연성은 임계 모드 기준 (TS-02: m=1 고정식은 고차 모드에서 45% 비보수)
+    flex_b = _shear_flexibility(si, D_use, a, b, res["mode_m"], res["mode_n"],
+                                warnings, si.unit_system)
     if res.get("boundary"):
         warnings.append(item("W130", field="buckling.mode",
                              detail=f"임계 모드가 스캔 상한({res['mode_scan']})에 걸렸습니다 — "
@@ -1035,12 +1038,18 @@ def run_buckling(payload, panel, load_ratio: float = 0.0, applied_Nx=None,
                  "at_scan_boundary": bool(res.get("boundary"))},
         "load_ratio_Ny_over_Nx": float(load_ratio),
         "applicability": appl,
+        **({"transverse_shear": {**flex_b,
+                                 "corrected_N_cr": res["N_cr"] * f["A"] * flex_b["buckling_factor"]}}
+           if flex_b else {}),
         "definition": "SS 4변, N_cr(m,n)=π²[D11(m/a)⁴+2(D12+2D66)(m/a)²(n/b)²+D22(n/b)⁴]/[(m/a)²+R(n/b)²] 최소. 압축 양수, Nxy 미지원",
     }
     if applied_Nx is not None:
         data["margin"] = {"applied_Nx": applied_Nx, "factor": data["N_cr"] / applied_Nx,
                           "meaning": "factor>1 이면 좌굴 전 (임계/작용)"}
     hash_payload = {"laminate": payload, "panel": panel, "load_ratio": load_ratio, "applied_Nx": applied_Nx}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warnings,
+                         payload=hash_payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
     return ENV.build(data=data, errors=[], warnings=warnings, payload=hash_payload,
                      unit_system=si.unit_system,
                      assumptions_extra=["좌굴: 4변 단순지지·specially orthotropic Navier 폐형해, 전단하중(Nxy) 미포함"],
@@ -1078,14 +1087,52 @@ def run_frequencies(payload, panel, n_modes: int = 5, include_debug: bool = Fals
     rho_areal = sum(p_.rho * p_.thickness for p_ in si.plies)   # SI kg/m²
     scan = max(NAV.MODE_SCAN, n_modes)      # f는 m·n 단조 증가 → scan ≥ n_modes면 상위 정확 (NAV-3)
     modes = NAV.natural_frequencies(D_use, rho_areal, a, b, n_modes, mode_scan=scan)
+
+    # 모달 감쇠 (§17.6.2) — 전 ply에 loss_factor가 있을 때만, 1차 모드 정합 (MSE-01/02)
+    from app.solver import interlaminar as IL
+    damping = None
+    m1, n1 = (modes[0]["m"], modes[0]["n"]) if modes else (1, 1)
+    have_eta = [k for k, p_ in enumerate(si.plies) if p_.loss_factor is not None]
+    if len(have_eta) == len(si.plies):
+        Am, Bm, Dm_, zc, _h = _abd_of_plies(si.plies)
+        qb = [MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
+              for p_ in si.plies]
+        eta = IL.modal_loss_factor(qb, zc, [p_.loss_factor for p_ in si.plies],
+                                   a_kk=Am[0, 0], b_kk=Bm[0, 0], d_kk=Dm_[0, 0],
+                                   a=a, b=b, m=m1, n=n1)
+        if eta is not None and eta > 0:
+            damping = {"modal_loss_factor": eta, "Q_factor": 1.0 / eta,
+                       "mode": {"m": m1, "n": n1},
+                       "definition": "MSE법 η = navier(D_η,m,n)/navier(D,m,n) — 1차 모드 정합, "
+                                     "비대칭이면 중립면 기준"}
+        elif eta == 0.0:
+            warnings.append(item("W120", field="material.loss_factor",
+                                 detail="전 ply loss_factor가 0 — 감쇠 없음으로 계산됩니다"))
+    elif have_eta:
+        warnings.append(item("W120", field="material.loss_factor",
+                             detail=f"loss_factor가 laminae"
+                                    f"{[k for k in range(len(si.plies)) if k not in have_eta]}에 없어 "
+                                    f"모달 감쇠를 산출하지 않았습니다 (감쇠 없는 층은 0으로 명시)"))
+
+    # 횡전단 유연성 (§17.6.3) — 1차 모드 기준
+    flex = _shear_flexibility(si, D_use, a, b, m1, n1, warnings, si.unit_system)
+
     data = {
         "modes": modes,                       # f_hz는 단위계 무관 [Hz]
         "scan_limit": scan,
+        **({"damping": damping} if damping else {}),
+        **({"transverse_shear": {
+            **flex,
+            "corrected_f1_hz": modes[0]["f_hz"] * flex["frequency_factor"] if modes else None,
+        }} if flex else {}),
         "rho_areal": rho_areal * units.FROM_SI[si.unit_system]["areal_mass"],
         "applicability": appl,
         "definition": "SS 4변, ω²=π⁴·navier(m,n)/ρ_areal, f [Hz]. 감쇠·부가질량 미포함",
     }
     hash_payload = {"laminate": payload, "panel": panel, "n_modes": n_modes}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warnings,
+                         payload=hash_payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
     return ENV.build(data=data, errors=[], warnings=warnings, payload=hash_payload,
                      unit_system=si.unit_system,
                      assumptions_extra=["진동: 4변 단순지지 Navier 폐형해 — 경계·감쇠·공기 부가질량 미반영"],
@@ -1148,4 +1195,175 @@ def run_progressive(payload, loads, discount: float = 0.1, include_debug: bool =
                          "진행성 파손: ply discount(하중 제어 quasi-static restart) 표준 근사 — "
                          f"기지/전단 파손 시 E2·G12·ν12×{discount}, 섬유 파손 시 전 성분×{discount}",
                          "열잔류응력 미중첩, ply 중앙 응력 기준, Tsai-Wu(첫 파손)+섬유 항(후속) 판정"],
+                     include_debug=include_debug, t0=t0)
+
+
+# ── V2-3차: 층간 응력 / 감쇠 / 횡전단 유연성 (계획서 §17.6) ─────────────────
+
+
+def _shear_flexibility(si, D_use, a, b, m, n, warnings, unit_system) -> dict | None:
+    """모드 정합 횡전단 유연성 R_s와 1차 FSDT 보정 (§17.6.3, 적대 검증 IL-2/TS-01~05 반영).
+
+    A55/A44는 ply 각도 변환 + 에너지등가(Whitney) — 샌드위치에서 코어 전단을 정확히 반영한다.
+    """
+    from app.solver import interlaminar as IL
+    A, B, D, z, h = _abd_of_plies(si.plies)
+    a55, a44 = IL.transverse_shear_stiffness(
+        si.plies, [(p_.g13, p_.g23) for p_ in si.plies],
+        qbars=[MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
+               for p_ in si.plies],
+        z=z, a_kk=(A[0, 0], A[1, 1]), b_kk=(B[0, 0], B[1, 1]), d_kk=(D[0, 0], D[1, 1]))
+    if a55 <= 0 and a44 <= 0:
+        return None
+    rs = IL.shear_flexibility_ratio(D_use, a55, a44, a, b, m, n)
+    if not math.isfinite(rs):
+        return None
+    assumed = any(p_.g_transverse_assumed for p_ in si.plies)
+    if rs > 0.02:
+        warnings.append(item("W130", field="transverse_shear",
+                             detail=f"횡전단 유연성 R_s = {rs:.3g} (>0.02, 임계모드 m={m},n={n}) — "
+                                    f"CLT 진동수·좌굴이 {100*(1-1/np.sqrt(1+rs)):.0f}% 이상 "
+                                    f"비보수적일 수 있습니다 (두꺼운 판·샌드위치 코어)"))
+    if assumed:
+        warnings.append(item("W120", field="material.G13/G23",
+                             detail="G13/G23 미지정 — 면내 G12로 근사했습니다 "
+                                    "(실제 G23는 보통 더 작아 R_s를 과소평가 = 비보수)"))
+    fA = units.FROM_SI[unit_system]["A"]
+    return {"A55": a55 * fA, "A44": a44 * fA, "R_s": rs,
+            "critical_mode": {"m": m, "n": n},
+            "G_transverse_assumed": assumed,
+            "frequency_factor": 1.0 / float(np.sqrt(1.0 + rs)),
+            "buckling_factor": 1.0 / (1.0 + rs),
+            "definition": "R_s = π²·navier(m,n)/(k²·S_eff), S_eff = (A55α²+A44β²)/k², "
+                          "α=m/a·β=n/b. A55/A44는 각도변환+에너지등가(Whitney). 보정은 1차 근사"}
+
+
+def run_interlaminar(payload, shear=None, detail: str = "auto",
+                    include_debug: bool = False) -> dict:
+    """평형법 층간 전단응력과 ILSS 여유 (compute_interlaminar_stresses Tool, §17.6.1)."""
+    from app.solver import interlaminar as IL
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    sh = shear if isinstance(shear, dict) else {}
+    if shear is not None and not isinstance(shear, dict):
+        return ENV.build(data=None, errors=[item("E100", field="shear",
+                                                 detail='shear는 {"Vx": , "Vy": } (단위 폭당 횡전단력) 객체여야 합니다')],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    vx, vy = sh.get("Vx", 0.0), sh.get("Vy", 0.0)
+    for nm, v in (("Vx", vx), ("Vy", vy)):
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
+            return ENV.build(data=None, errors=[item("E100", field=f"shear.{nm}",
+                                                     detail=f"shear.{nm}는 유한한 숫자여야 합니다")],
+                             warnings=warnings, payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+    if vx == 0.0 and vy == 0.0:
+        return ENV.build(data=None, errors=[item("E100", field="shear",
+                                                 detail="Vx·Vy가 모두 0입니다 — 최소 하나는 0이 아니어야 합니다 "
+                                                        "(굽힘 모멘트 구배 = 횡전단력)")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    if detail not in ("auto", "full"):
+        return ENV.build(data=None, errors=[item("E100", field="detail",
+                                                 detail="detail은 auto|full 중 하나여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    A, B, D, z, h = _abd_of_plies(si.plies)
+    qbars = [MAT.qbar_matrix(MAT.q_matrix(p.E1, p.E2, p.G12, p.nu12), p.angle_deg) for p in si.plies]
+    f = units.FROM_SI[si.unit_system]
+    fv = units.TO_SI[si.unit_system]["load_n"]        # V도 N/m 계열 (A와 동일 차원)
+
+    data: dict = {"note": "평형법 사후 복원 — 원통형 굽힘(∂M/∂x=V) 가정, 막-굽힘 연성 포함, 자유단 3D 효과 미포함"}
+    for comp, (nm, v, akk, bkk, dkk) in enumerate((("x", vx, A[0, 0], B[0, 0], D[0, 0]),
+                                                   ("y", vy, A[1, 1], B[1, 1], D[1, 1]))):
+        if v == 0.0:
+            continue
+        try:
+            prof = IL.transverse_shear_profile(qbars, z, akk, bkk, dkk, v * fv, comp=comp)
+        except ZeroDivisionError:
+            return ENV.build(data=None, errors=[item("E400", field="laminate")], warnings=warnings,
+                             payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+        pk = IL.peak_shear(prof)
+        block = {
+            "applied_V": v,
+            "peak": {"tau": pk["tau"] * f["modulus"], "z_from_midplane": pk["z"] * f["z"],
+                     "interface": pk["interface"]},
+            "profile": [{"z": p_["z"] * f["z"], "tau": p_["tau"] * f["modulus"],
+                         "interface": p_["interface"]} for p_ in prof],
+        }
+        if detail == "auto" and len(prof) > config.SUMMARY_PLY_LIMIT:
+            keep = sorted(prof, key=lambda p_: -abs(p_["tau"]))[:config.SUMMARY_TOP_N]
+            keep_z = {p_["z"] for p_ in keep} | {float(z[0]), float(z[-1])}
+            block["profile"] = [pt for pt in block["profile"]
+                                if any(abs(pt["z"] / f["z"] - kz) < 1e-15 for kz in keep_z)]
+            block["profile_truncation"] = (f"프로파일 {len(prof)}점 중 |τ| 상위 "
+                                           f"{len(block['profile'])}점만 반환 — 전체는 detail=\"full\"")
+        # ILSS 여유 — 계면뿐 아니라 ply 내부 극값까지 (IL-4/IL-02: 최대 τ가 내부면 누락됐음)
+        margins, unevaluated = [], []
+        for p_ in prof:
+            if abs(p_["tau"]) < 1e-300:
+                continue
+            if p_["interface"]:
+                k = int(p_["interface"].split("/")[0])
+                cands = [si.plies[k].ilss, si.plies[k + 1].ilss]
+                loc = f"interface {p_['interface']}"
+            else:
+                kk = next((i for i in range(len(si.plies)) if z[i] <= p_["z"] <= z[i + 1]), None)
+                if kk is None:
+                    continue
+                cands = [si.plies[kk].ilss]
+                loc = f"ply {kk} 내부"
+            avail = [c for c in cands if c is not None]
+            if not avail:
+                unevaluated.append({"location": loc, "tau": p_["tau"] * f["modulus"],
+                                    "reason": "해당 위치 ply에 ilss 미입력"})
+                continue
+            margins.append({"location": loc, "z": p_["z"] * f["z"],
+                            "ilss": min(avail) * f["modulus"],
+                            "margin": min(avail) / abs(p_["tau"]),
+                            **({"one_sided": True} if len(avail) < len(cands) else {})})
+        if margins:
+            worst = min(margins, key=lambda m: m["margin"])
+            block["ilss_margins"] = margins
+            block["critical_location"] = worst
+            block["meaning"] = "margin = ILSS/|τ| — 1 미만이면 층간 전단 파손(박리) 예상"
+        if unevaluated:
+            block["ilss_unevaluated"] = unevaluated[:5]
+            block["ilss_note"] = ("일부 위치는 ilss 미입력으로 평가되지 않았습니다 — "
+                                  "critical_location이 실제 최악이 아닐 수 있습니다")
+        data[f"tau_{nm}z"] = block
+
+    # 자유단 박리 경향 (정성 순위)
+    mism = []
+    for k in range(len(si.plies) - 1):
+        q1, q2 = float(qbars[k][0, 0]), float(qbars[k + 1][0, 0])
+        gap = abs(si.plies[k + 1].angle_deg - si.plies[k].angle_deg)
+        mism.append({"interface": f"{k}/{k+1}",
+                     "angle_jump_deg": min(gap, 180.0 - gap) if gap else 0.0,
+                     "stiffness_mismatch": abs(q1 - q2) / max(q1, q2)})
+    if mism:
+        mism.sort(key=lambda m: -(m["stiffness_mismatch"] + m["angle_jump_deg"] / 90.0))
+        data["free_edge_risk_ranking"] = mism[:5]
+        data["free_edge_note"] = ("정성 순위 — 자유단 층간응력은 각도 점프·강성 불일치가 클수록 집중된다. "
+                                  "정량 예측은 3D 해석 필요")
+        warnings.append(item("W130", field="free_edge_risk_ranking",
+                             detail="자유단 박리는 CLT 평형법으로 정량화되지 않습니다 (순위는 정성 지표)"))
+
+    hash_payload = {"laminate": payload, "shear": shear}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warnings,
+                         payload=hash_payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warnings, payload=hash_payload,
+                     unit_system=si.unit_system,
+                     assumptions_extra=[
+                         "층간 전단: 3D 평형식 사후 복원 — N=0·dM/dx=V의 2×2 연성계(det=AD−B²)를 풀어 "
+                         "τ(z) = −∫Q̄(ζ)(ε0'+κ'ζ)dζ (막-굽힘 연성 포함, 비대칭에서도 유효)",
+                         "상하 자유표면 τ=0은 자동 만족(엔진 불변식). 자유단 경계층·σz는 미포함"],
                      include_debug=include_debug, t0=t0)

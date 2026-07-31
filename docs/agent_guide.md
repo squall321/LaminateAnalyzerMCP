@@ -129,3 +129,15 @@ found/why_it_matters/fix_hint를 그대로 사용자에게 전달하면 근거 �
 
 **공통 함정** — 이 도구들은 CLT 기반이라 두꺼운 판·샌드위치 코어(횡전단 지배)에서는 부정확하다.
 응답의 `assumptions`와 W130 경고를 반드시 사용자에게 전달할 것.
+
+## 9. 층간·감쇠·두께 한계 (v0.6.0)
+
+**compute_interlaminar_stresses** — `shear={"Vx","Vy"}`는 **굽힘 모멘트의 공간 구배(전단력)**이지
+면내 전단(Nxy)이 아니다. 반환의 `critical_location`이 최악 지점(계면 또는 ply 내부)이며
+margin<1이면 박리 예상. `ilss_unevaluated`가 있으면 그 위치는 강도 미입력이라 평가에서 빠진
+것이니 최악이 바뀔 수 있다고 보고할 것. 자유단 순위는 정성 지표(W130 동반).
+
+**감쇠·횡전단** — `compute_natural_frequencies`가 전 ply에 loss_factor가 있으면 1차 모드 기준
+모달 η와 Q를 준다(일부만 주면 W120으로 알림). `transverse_shear.R_s`는 **임계 모드 기준**이며
+0.02를 넘으면 CLT가 비보수적이라는 뜻 — corrected_f1_hz·corrected_N_cr을 함께 보고할 것.
+샌드위치는 A55가 코어 전단에 지배되어 R_s가 크게 나오는 것이 정상이다(CLT 한계의 정량 신호).

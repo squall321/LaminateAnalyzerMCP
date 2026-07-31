@@ -1,6 +1,6 @@
 [project]
 name = "laminate-analyzer-mcp"
-version = "0.5.0"
+version = "0.6.0"
 description = "적층 복합재 중립면·ABD·평가 지표를 결정론적으로 계산하는 MCP 서버 (stdio + HEAXHub streamable HTTP)"
 requires-python = ">=3.12"
 dependencies = [

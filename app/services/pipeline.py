@@ -1367,3 +1367,103 @@ def run_interlaminar(payload, shear=None, detail: str = "auto",
                          "τ(z) = −∫Q̄(ζ)(ε0'+κ'ζ)dζ (막-굽힘 연성 포함, 비대칭에서도 유효)",
                          "상하 자유표면 τ=0은 자동 만족(엔진 불변식). 자유단 경계층·σz는 미포함"],
                      include_debug=include_debug, t0=t0)
+
+
+def run_fatigue(payload, loads_max, loads_min=None, include_debug: bool = False) -> dict:
+    """하중 사이클의 ply별 피로 수명 (estimate_fatigue_life Tool, §17.7).
+
+    정적 파손지수 FI=1/R(Tsai-Wu) 공간에서 Goodman 보정 + S-N. strength와 fatigue 둘 다 필요.
+    """
+    from app.solver import failure as FAIL
+    from app.solver import fatigue as FAT
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+
+    N_max, M_max, err = _loads_to_si(loads_max, si.unit_system)
+    if err is not None:
+        return ENV.build(data=None, errors=[err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+    if loads_min is None:
+        N_min, M_min = np.zeros(3), np.zeros(3)      # R=0 (영-인장) 기본
+    else:
+        N_min, M_min, err2 = _loads_to_si(loads_min, si.unit_system)
+        if err2 is not None and not (isinstance(loads_min, dict)
+                                     and all(v == [0, 0, 0] for v in loads_min.values())):
+            return ENV.build(data=None, errors=[err2], warnings=warnings, payload=payload,
+                             unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+        if err2 is not None:
+            N_min, M_min = np.zeros(3), np.zeros(3)
+
+    usable = [k for k, p_ in enumerate(si.plies) if p_.strength is not None and p_.fatigue is not None]
+    if not usable:
+        return ENV.build(data=None, errors=[item("E100", field="laminae",
+                                                 detail="피로 평가에는 ply에 strength{Xt..S}와 "
+                                                        "fatigue{model_type,k|b}가 모두 필요합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    A, B, D, z, h = _abd_of_plies(si.plies)
+    qbars = [MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
+             for p_ in si.plies]
+    try:
+        e_max, k_max = RESP.solve_response(A, B, D, N_max, M_max)
+        e_min, k_min = RESP.solve_response(A, B, D, N_min, M_min)
+    except RESP.SingularSystemError:
+        return ENV.build(data=None, errors=[item("E400", field="laminate")], warnings=warnings,
+                         payload=payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    rows = []
+    for k in usable:
+        p_ = si.plies[k]
+        model, param = p_.fatigue
+        worst = None
+        for zv in (float(z[k]), float(z[k] + z[k + 1]) / 2.0, float(z[k + 1])):
+            fis = []
+            for eps0, kap in ((e_max, k_max), (e_min, k_min)):
+                s12 = FAIL.stress_to_material_axes(
+                    FAIL.ply_stresses_at(qbars[k], eps0, kap, zv), p_.angle_deg)
+                r = FAIL.tsai_wu(s12, *p_.strength).get("strength_ratio")
+                fis.append(0.0 if r is None or r <= 0 else 1.0 / r)
+            res = FAT.assess(fis[0], fis[1], model, param)
+            n = res["cycles_to_failure"]
+            if n is not None and (worst is None or n < worst[0]["cycles_to_failure"]
+                                  or worst[0]["cycles_to_failure"] is None):
+                worst = (res, zv)
+        if worst is None:
+            rows.append({"ply": k, "infinite_life": True,
+                         "note": "등가 교번 응력 0 — 피로 손상 없음"})
+        else:
+            res, zv = worst
+            rows.append({"ply": k, "z": zv * units.FROM_SI[si.unit_system]["z"],
+                         "FI_amplitude": res["FI_amplitude"], "FI_mean": res["FI_mean"],
+                         "FI_ar": res["FI_ar"] if math.isfinite(res["FI_ar"]) else None,
+                         "cycles_to_failure": res["cycles_to_failure"],
+                         "at_cap": res["at_cap"], "model": model, "param": param,
+                         **({"note": res["note"]} if "note" in res else {})})
+
+    finite = [r for r in rows if r.get("cycles_to_failure") is not None]
+    critical = min(finite, key=lambda r: r["cycles_to_failure"]) if finite else None
+    skipped = [k for k in range(len(si.plies)) if k not in usable]
+    data = {
+        "plies": rows,
+        "critical_ply": critical,
+        "life_cycles": critical["cycles_to_failure"] if critical else None,
+        "meaning": ("life_cycles = 임계 ply의 반복 수명 추정. Goodman 평균응력 보정 후 S-N. "
+                    f"{FAT.N_CAP:.0e} 도달 시 at_cap=true(사실상 무한수명)"),
+    }
+    if skipped:
+        data["note"] = f"laminae{skipped}는 strength 또는 fatigue 미입력 — 평가 제외"
+    hash_payload = {"laminate": payload, "loads_max": loads_max, "loads_min": loads_min}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warnings,
+                         payload=hash_payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warnings, payload=hash_payload,
+                     unit_system=si.unit_system,
+                     assumptions_extra=[
+                         "피로: 정규화 파손지수(FI=1/R_TsaiWu) 공간의 S-N + Goodman — 등진폭·비례하중 1차 근사",
+                         "층간·박리 피로, 잔류강도 저하, 하중 순서 효과, 온도·습도 영향은 미포함"],
+                     include_debug=include_debug, t0=t0)

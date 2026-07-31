@@ -1,7 +1,7 @@
 schema_version: 2
 id: laminate_analyzer_mcp
 name: Laminate Analyzer MCP
-version: 0.6.0
+version: 0.7.0
 owner: cae-automation
 status: beta
 app_type: web_app
@@ -14,7 +14,7 @@ description: |
   - MCP 엔드포인트: /apps/laminate_analyzer_mcp/mcp (streamable HTTP)
     에이전트 등록 예) claude mcp add --transport http laminate-analyzer <포털베이스>/apps/laminate_analyzer_mcp/mcp
   - 헬스체크: /health. 웹 UI 없음(JSON API + MCP 전용).
-  - Tool 20종: analyze_laminate(원샷 진입점), validate_laminate_input, compute_abd_matrix,
+  - Tool 21종: analyze_laminate(원샷 진입점), validate_laminate_input, compute_abd_matrix,
     compute_neutral_axis, evaluate_laminate, get_reference_cases(폐형해 자가검증), get_server_info,
     solve_load_response(하중응답·유효상수), run_sensitivity_analysis, batch_evaluate_laminates,
     generate_design_report(ko/en), recover_ply_stresses(층별 응력·Tsai-Wu 파손·FPF), compute_thermal_response(유효 CTE·열곡률·PCB 휨·잔류응력),

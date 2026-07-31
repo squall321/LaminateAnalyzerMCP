@@ -267,6 +267,18 @@ def compute_interlaminar_stresses(laminate: dict, shear: dict, detail: str = "au
 
 
 @mcp.tool()
+def estimate_fatigue_life(laminate: dict, loads_max: dict, loads_min: dict | None = None) -> dict:
+    """하중 사이클에 대한 ply별 피로 수명(반복 횟수) 추정.
+
+    loads_max/loads_min = {"N":[...], "M":[...]} (단위 폭당). loads_min 생략 시 0(영-인장, R=0).
+    각 ply에 strength{Xt,Xc,Yt,Yc,S}와 fatigue{model_type:"log_linear"|"basquin", k|b}가 필요.
+    정적 파손지수 FI=1/R(Tsai-Wu) 공간에서 Goodman 평균응력 보정 후 S-N을 적용하므로
+    다축·오프액시스 응력이 자동 처리된다. life_cycles = 임계 ply 수명(등진폭 1차 근사).
+    """
+    return _guarded(PIPE.run_fatigue, laminate, loads_max=loads_max, loads_min=loads_min)
+
+
+@mcp.tool()
 def get_reference_cases(case_id: str | None = None) -> dict:
     """내장 기준 케이스를 반환한다. case_id 생략 시 목록.
 
@@ -332,6 +344,7 @@ def guide() -> str:
 15) 층간·박리: compute_interlaminar_stresses(laminate, shear={"Vx","Vy"}) — τxz 분포·ILSS 여유.
 16) 감쇠·두께 한계: compute_natural_frequencies가 loss_factor 있으면 모달 η·Q,
     G13/G23로 횡전단 유연성 R_s를 계산해 CLT가 부정확해지는 지점을 알려준다.
+17) 피로: estimate_fatigue_life(laminate, loads_max, loads_min?) — Goodman+S-N 반복 수명.
 
 ## materialtwin 연계 (물성을 모를 때)
 - materialtwin MCP의 list_materials/search_by_property → get_material에서 실측 E를 얻는다.

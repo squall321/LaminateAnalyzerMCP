@@ -37,6 +37,7 @@ class SiPly:
     g_transverse_assumed: bool = False   # G12로 대체했는지 (가정 표기용)
     ilss: float | None = None      # Pa (층간 전단강도)
     loss_factor: float | None = None
+    fatigue: tuple | None = None   # (model_type, param) — S-N (§17.7 선택)
 
     @property
     def has_cte(self) -> bool:
@@ -215,6 +216,18 @@ def validate_and_convert(payload) -> tuple[SiLaminate | None, list[dict], list[d
             errors.append(item("E100", field=f"{base}.material.viscoelastic",
                                detail=f"{base}: Einf({ve.Einf}) > E0({ve.E0}) — 이완 특성은 Einf <= E0 이어야 합니다"))
 
+        # 피로 S-N (§17.7) — 모델별 파라미터 존재 검증
+        fat_si = None
+        if m.fatigue is not None:
+            mt = m.fatigue.model_type
+            par = m.fatigue.k if mt == "log_linear" else m.fatigue.b
+            if par is None:
+                errors.append(item("E100", field=f"{base}.material.fatigue",
+                                   detail=f"{base}: fatigue.model_type='{mt}'에는 "
+                                          f"{'k' if mt == 'log_linear' else 'b'}가 필요합니다"))
+            else:
+                fat_si = (mt, float(par))
+
         # 횡전단 (§17.6) — 미지정이면 면내 G12로 근사(가정 표기)
         if m.type == "isotropic":
             g13_si = g23_si = G12          # 등방은 G13=G23=G (근사 아님)
@@ -237,7 +250,7 @@ def validate_and_convert(payload) -> tuple[SiLaminate | None, list[dict], list[d
                                      if m.strength is not None else None),
                            g13=g13_si, g23=g23_si, g_transverse_assumed=g_assumed,
                            ilss=(m.ilss * f["modulus"] if m.ilss is not None else None),
-                           loss_factor=m.loss_factor))
+                           loss_factor=m.loss_factor, fatigue=fat_si))
         fingerprint.append((lam.thickness, angle_norm, E1, E2, G12, nu12, rho_si, a1, a2))
 
     if errors:

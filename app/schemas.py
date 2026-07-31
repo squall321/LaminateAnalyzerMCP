@@ -24,6 +24,18 @@ class Strength(BaseModel):
     S: float = Field(gt=0, description="면내 전단강도")
 
 
+class FatigueSN(BaseModel):
+    """S-N 곡선 파라미터 (피로 수명 추정용, §17.7). 정적 한계 대비 정규화 형태."""
+    model_config = ConfigDict(extra="forbid")
+    model_type: Literal["log_linear", "basquin"] = Field(
+        default="log_linear",
+        description="log_linear: FI=1−k·log10(N) (복합재 관례) | basquin: FI=N^(−b) (금속 관례)")
+    k: float | None = Field(default=None, gt=0, le=1,
+                            description="log_linear 기울기 (decade당 강도 저하율, CFRP ~0.1)")
+    b: float | None = Field(default=None, gt=0, le=1,
+                            description="basquin 지수 (금속 ~0.08~0.12)")
+
+
 class Viscoelastic(BaseModel):
     """보호층 이완 특성 (준탄성 근사용, §17.2). materialtwin Prony(E0/Einf/tau)와 단위 정합."""
     model_config = ConfigDict(extra="forbid")
@@ -44,6 +56,7 @@ class IsotropicMaterial(BaseModel):
     loss_factor: float | None = Field(default=None, ge=0, description="재료 손실계수 η (모달 감쇠 산출 시). 금속 ~1e-4, 에폭시 ~0.01, 점탄성 PSA ~0.5")
     viscoelastic: Viscoelastic | None = None
     strength: Strength | None = None
+    fatigue: FatigueSN | None = None
     name: str | None = Field(default=None, description="재료 라벨 (추적용)")
     source: SourceInfo | None = None
 
@@ -66,6 +79,7 @@ class Orthotropic2DMaterial(BaseModel):
     loss_factor: float | None = Field(default=None, ge=0, description="재료 손실계수 η (모달 감쇠 산출 시)")
     viscoelastic: Viscoelastic | None = None
     strength: Strength | None = None
+    fatigue: FatigueSN | None = None
     name: str | None = Field(default=None, description="재료 라벨 (추적용)")
     source: SourceInfo | None = None
 

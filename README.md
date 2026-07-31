@@ -21,6 +21,22 @@ LLM 에이전트가 계산을 직접 하지 않고 이 서버를 호출한다. �
 에이전트용 상세 절차는 [docs/agent_guide.md](docs/agent_guide.md), 수식 유도는 [docs/math_spec.md](docs/math_spec.md),
 두 MCP 협동 실 세션 기록은 [docs/s5_scenario_log.md](docs/s5_scenario_log.md).
 
+## 두 표면 — MCP와 REST
+
+같은 계산·검증·응답 envelope를 두 경로로 노출한다.
+
+| 소비자 | 경로 | 발견 방법 |
+|---|---|---|
+| LLM 에이전트 (Claude 등) | `POST /mcp` (streamable HTTP) 또는 stdio | `tools/list` · `laminate://guide` 리소스 · `get_reference_cases` few-shot |
+| 스크립트·서비스·사람 | `GET/POST /api/v1/tools[/{name}]` | `GET /api/v1/tools`(목록+JSON Schema) · `GET /api/v1/guide` · `/docs`(OpenAPI) |
+
+```bash
+curl -s localhost:8000/api/v1/tools | jq '.tools[].name'        # 도구 21종
+curl -s -X POST localhost:8000/api/v1/tools/analyze_laminate \
+     -H 'Content-Type: application/json' \
+     -d '{"laminate":{"unit_system":"SI_mm","laminae":[...]}}'   # 실행
+```
+
 ## 실행
 
 ```bash
@@ -29,7 +45,7 @@ LLM 에이전트가 계산을 직접 하지 않고 이 서버를 호출한다. �
 
 # HTTP (HEAXHub fastapi 스택과 동일 형태)
 .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --root-path /apps/laminate_analyzer_mcp
-# → GET /health, MCP는 POST /mcp (streamable HTTP)
+# → GET /health · REST /api/v1/* · OpenAPI /docs · MCP POST /mcp
 ```
 
 ## hwax portal(HEAXHub) 등록 — 완료
@@ -49,5 +65,5 @@ claude mcp add --transport http laminate-analyzer \
 
 ```bash
 python3.12 -m venv .venv && .venv/bin/pip install -e ".[test]"
-.venv/bin/pytest            # 212 tests
+.venv/bin/pytest            # 216 tests
 ```

@@ -357,6 +357,10 @@ def guide() -> str:
 - 단축 인장은 E만 준다: nu는 가정값(금속 ~0.3)을 쓰고 material.source={"type":"assumed"}로
   표기하면 W120 경고와 assumptions로 추적된다.
 
+## REST로도 같은 계산이 가능하다
+MCP 클라이언트가 없는 소비자(스크립트·서비스)는 GET /api/v1/tools(목록+스키마),
+POST /api/v1/tools/{name}(실행), GET /api/v1/guide(이 문서)를 쓰면 된다 — 결과는 동일하다.
+
 ## 주의
 - 오류 응답의 suggestion은 그대로 따라 수정→재호출 가능하게 작성돼 있다.
 - warnings(특히 W110 단위 의심)와 assumptions를 사용자 보고에 반드시 포함할 것.

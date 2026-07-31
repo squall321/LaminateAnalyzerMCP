@@ -1,7 +1,7 @@
 schema_version: 2
 id: laminate_analyzer_mcp
 name: Laminate Analyzer MCP
-version: 0.7.1
+version: 0.7.2
 owner: cae-automation
 status: beta
 app_type: web_app
@@ -11,9 +11,11 @@ description: |
   적층 복합재의 중립면(neutral surface)·ABD 강성·평가 지표(커플링/이방성/준등방성)를
   결정론적으로 계산하는 MCP 서버. LLM 에이전트가 직접 호출하는 계산 커널로,
   동일 입력이면 바이트 단위로 동일한 응답을 보장한다(payload_hash 추적).
-  - MCP 엔드포인트: /apps/laminate_analyzer_mcp/mcp (streamable HTTP)
+  - 두 표면: MCP(/apps/laminate_analyzer_mcp/mcp, streamable HTTP)와
+    REST(/apps/laminate_analyzer_mcp/api/v1/tools — 목록·스키마·실행, OpenAPI /docs).
+    같은 계산·검증·envelope를 쓰므로 MCP 클라이언트 없는 소비자도 동일 결과를 얻는다.
     에이전트 등록 예) claude mcp add --transport http laminate-analyzer <포털베이스>/apps/laminate_analyzer_mcp/mcp
-  - 헬스체크: /health. 웹 UI 없음(JSON API + MCP 전용).
+  - 헬스체크: /health (rest_base·mcp_endpoint 안내 포함). 웹 UI 없음.
   - Tool 21종: analyze_laminate(원샷 진입점), validate_laminate_input, compute_abd_matrix,
     compute_neutral_axis, evaluate_laminate, get_reference_cases(폐형해 자가검증), get_server_info,
     solve_load_response(하중응답·유효상수), run_sensitivity_analysis, batch_evaluate_laminates,

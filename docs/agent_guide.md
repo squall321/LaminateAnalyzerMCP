@@ -155,3 +155,19 @@ margin<1이면 박리 예상. `ilss_unevaluated`가 있으면 그 위치는 강�
   CFRP 인장 피로는 보통 σ2(기지) 지배 — 이건 정적 FPF와 같은 물리다.
 - **한계 보고 필수**: 등진폭·비례하중 1차 근사이고, S-N은 시험 데이터 범위(1e4~1e7) 밖에서
   외삽이다. 큰 N은 자릿수만 참고하라고 전할 것. `at_cap=true`는 사실상 무한수명 신호.
+
+## 11. REST 표면 (v0.7.2) — MCP가 없는 소비자용
+
+같은 서버가 두 표면을 제공한다. 계산·검증·응답 envelope는 동일하다.
+
+| 목적 | REST |
+|---|---|
+| 어떤 도구가 있나 | `GET /api/v1/tools` — 21종의 이름·설명·입력 JSON Schema |
+| 한 도구 상세 | `GET /api/v1/tools/{name}` |
+| 실행 | `POST /api/v1/tools/{name}` (본문 = 인자 객체) |
+| 사용 규약 | `GET /api/v1/guide` (laminate://guide와 동일) |
+| 서버 정보 | `GET /api/v1/info` · 대화형 문서 `/docs` |
+
+HTTP 코드 규약: 계산 오류는 **200 + envelope**(status=error, errors[].suggestion으로 자가 복구),
+없는 도구는 404, 인자가 스키마와 안 맞으면 422. 도구는 MCP 레지스트리를 단일 소스로 쓰므로
+새 도구를 추가하면 REST에 자동 반영된다.

@@ -1112,15 +1112,18 @@ def run_buckling(payload, panel, load_ratio: float = 0.0, applied_Nx=None,
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
 
-    if boundary not in NAV.BOUNDARIES:
+    bpairs = NAV.normalize_boundary(boundary)
+    if bpairs is None:
         return ENV.build(data=None, errors=[item("E100", field="boundary",
-                                                 detail=f"boundary는 {list(NAV.BOUNDARIES)} 중 하나여야 합니다")],
+                                                 detail=f"boundary는 'simply_supported'·'clamped' 또는 "
+                                                        f"S·C 4글자 코드(앞 두 글자=x변, 뒤 두 글자=y변, "
+                                                        f"예: 'CCSS')여야 합니다. {NAV.FREE_EDGE_NOTE}")],
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
 
     D_use, appl, h, _ = _bending_stiffness_for_navier(si, warnings)
     _compliant_core_gate(si, min(a, b), warnings, "짧은 변")   # §19.12
-    if boundary == "clamped":
+    if bpairs != ("SS", "SS"):
         res = NAV.scan_ritz_buckling(D_use, a, b, float(load_ratio), boundary,
                                      NAV.CLAMPED_MODE_LIMIT)
     else:
@@ -1139,16 +1142,18 @@ def run_buckling(payload, panel, load_ratio: float = 0.0, applied_Nx=None,
         warnings.append(item("W130", field="buckling.mode",
                              detail=f"임계 모드가 스캔 상한({res['mode_scan']})에 걸렸습니다 — "
                                     f"N_cr이 비보수적으로 과대평가되었을 수 있습니다"))
-    if boundary == "clamped":
+    if bpairs != ("SS", "SS"):
         warnings.append(item("W130", field="boundary",
-                             detail="고정단은 폐형해가 없어 1항 Rayleigh–Ritz 로 푼다 — **상계**라 "
-                                    "N_cr 을 과대평가한다(등방 정사각에서 k=10.74 vs 정해 10.07, "
-                                    "+6.6%로 비보수). 보수적 판정이 필요하면 "
-                                    "boundary='simply_supported' 값을 하한으로 함께 볼 것"))
+                             detail="단순지지 외 경계는 폐형해가 없어 1항 Rayleigh–Ritz 로 푼다 — "
+                                    "**상계**라 N_cr 을 과대평가한다. 등방 정사각 실측 오차: "
+                                    "CCCC +6.6%(k=10.74 vs 10.07), SSCC +11.6%(7.78 vs 6.97). "
+                                    "혼합 경계일수록 오차가 커진다. boundary='SSSS' 값을 하한으로 "
+                                    "함께 보아 참값을 감쌀 것"))
     f = units.FROM_SI[si.unit_system]
     data = {
         "N_cr": res["N_cr"] * f["A"],
         "boundary": boundary,
+        "boundary_pairs": {"x_edges": bpairs[0], "y_edges": bpairs[1]},
         "mode": {"m": res["mode_m"], "n": res["mode_n"], "scan_limit": res["mode_scan"],
                  "at_scan_boundary": bool(res.get("boundary"))},
         "load_ratio_Ny_over_Nx": float(load_ratio),
@@ -1199,9 +1204,12 @@ def run_frequencies(payload, panel, n_modes: int = 5, boundary: str = "simply_su
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
 
-    if boundary not in NAV.BOUNDARIES:
+    bpairs = NAV.normalize_boundary(boundary)
+    if bpairs is None:
         return ENV.build(data=None, errors=[item("E100", field="boundary",
-                                                 detail=f"boundary는 {list(NAV.BOUNDARIES)} 중 하나여야 합니다")],
+                                                 detail=f"boundary는 'simply_supported'·'clamped' 또는 "
+                                                        f"S·C 4글자 코드(예: 'CCSS')여야 합니다. "
+                                                        f"{NAV.FREE_EDGE_NOTE}")],
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
 
@@ -1209,12 +1217,13 @@ def run_frequencies(payload, panel, n_modes: int = 5, boundary: str = "simply_su
     _compliant_core_gate(si, min(a, b), warnings, "짧은 변")   # §19.12
     rho_areal = sum(p_.rho * p_.thickness for p_ in si.plies)   # SI kg/m²
     scan = max(NAV.MODE_SCAN, n_modes)      # f는 m·n 단조 증가 → scan ≥ n_modes면 상위 정확 (NAV-3)
-    if boundary == "clamped":
+    if bpairs != ("SS", "SS"):
         modes = NAV.ritz_frequencies(D_use, rho_areal, a, b, boundary, n_modes, scan)
         warnings.append(item("W130", field="boundary",
-                             detail="고정단은 1항 Rayleigh–Ritz 근사다 — 주파수를 약간 과대평가한다. "
-                                    "등방 정사각 1차 모드에서 고정/SS 비 1.829 (문헌 1.83)로 정확도가 "
-                                    "좋지만 고차 모드일수록 오차가 커진다"))
+                             detail="단순지지 외 경계는 1항 Rayleigh–Ritz 근사다 — 주파수를 약간 "
+                                    "과대평가한다. 등방 정사각 1차 모드 실측: CCCC 비 1.829(문헌 1.83, "
+                                    "−0.0%)로 매우 정확하지만 CSCS 는 1.379(문헌 1.265, +9.0%)다. "
+                                    "혼합 경계·고차 모드일수록 오차가 커진다"))
     else:
         modes = NAV.natural_frequencies(D_use, rho_areal, a, b, n_modes, mode_scan=scan)
 

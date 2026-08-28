@@ -227,10 +227,13 @@ def compute_buckling(laminate: dict, panel: dict, load_ratio: float = 0.0,
 
     panel = {"Lx","Ly"} (길이 단위 — 다른 키를 넣으면 E100). 2축 압축: load_ratio = Ny/Nx
     (압축 양수), Nxy 미지원. applied_Nx(압축 크기)를 주면 margin.factor = N_cr/Nx.
-    **boundary**: "simply_supported"(기본, Navier 폐형해 m·n=1..10 스캔) |
-    "clamped"(고정단 4변, 1항 Rayleigh–Ritz). 실제 패널은 고정단에 가까운 경우가 많고
-    N_cr 이 2.5배 이상 달라진다 — 다만 Ritz 는 **상계**라 고정단 값은 비보수다(W130).
-    두 값을 함께 보면 참값을 감싼다(SS = 하한, clamped = 상계 추정).
+    **boundary**: "simply_supported"(기본, Navier 폐형해 m·n=1..10 스캔) | "clamped" |
+    **S·C 4글자 코드** — 앞 두 글자가 x 방향 두 변, 뒤 두 글자가 y 방향 두 변이다
+    (예: "CCSS" = x변 고정-고정, y변 단순-단순). SS/CC/CS(=SC) 조합 9종을 지원한다.
+    실제 패널은 고정단에 가까운 경우가 많고 N_cr 이 2.5배 이상 달라진다 — 다만 1항 Ritz 는
+    **상계**라 비보수다. 등방 정사각 실측 오차 CCCC +6.6%, SSCC +11.6% (W130).
+    'SSSS' 값을 하한으로 함께 보면 참값을 감싼다.
+    **자유변(F)은 거부한다** — 1항 Ritz 가 강체 모드를 놓쳐 6.4배 비보수가 된다(E100).
     비대칭 적층은 축소강성 D*로 근사(W130), D16/D26 유의 시 경고(W130).
     횡전단 유연성이 유의하면(R_s>0.02) corrected_N_cr(1차 FSDT 보정)을 함께 반환한다.
     """
@@ -245,8 +248,9 @@ def compute_natural_frequencies(laminate: dict, panel: dict, n_modes: int = 5,
     """직교이방 판의 고유진동수 [Hz] (낮은 순 n_modes개).
 
     전 ply에 밀도(rho)가 필요하다. panel = {"Lx","Ly"}. NVH·공진 회피 1차 판단용.
-    **boundary**: "simply_supported"(기본, Navier 폐형해) | "clamped"(1항 Rayleigh–Ritz).
-    등방 정사각 1차 모드에서 고정/SS 비 1.829 (문헌 1.83) — 진동수는 정확도가 좋다.
+    **boundary**: "simply_supported"(기본) | "clamped" | S·C 4글자 코드(예: "CCSS" —
+    앞 두 글자가 x변, 뒤 두 글자가 y변). 진동수는 정확도가 좋다 — 등방 정사각 1차 모드에서
+    CCCC 비 1.829(문헌 1.83)이지만 CSCS 는 +9.0% 오차다. 자유변(F)은 거부한다.
     전 ply에 loss_factor(η)가 있으면 모달 감쇠(MSE법)와 Q factor를 함께 반환한다.
     횡전단 유연성 R_s = π²D11/(A55a²)도 함께 계산 — 0.02 초과면 CLT가 비보수적이므로
     W130과 1차 보정값(corrected_f1_hz)을 병기한다(두꺼운 판·샌드위치 판단 근거).

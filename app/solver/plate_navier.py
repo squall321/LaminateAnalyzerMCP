@@ -107,49 +107,101 @@ def bend_twist_significance(Dm: np.ndarray) -> float:
 # ⚠ 1항 Ritz 는 **상계**다 — 등방 정사각 고정단에서 k = 10.74 vs 정해 10.07 (+6.6%).
 #   N_cr 을 과대평가하므로 비보수다. 호출부가 반드시 경고한다.
 
+# 지원 경계조건 — S(단순지지)·C(고정) 의 변 쌍. 뒤집힌 표기는 정규화한다.
+#
+# **자유변(F)은 지원하지 않는다.** 1항 Ritz 는 보의 첫 **탄성** 모드를 쓰는데, 자유변이
+# 있으면 강체 모드(lambda=0: 병진·회전)가 실제 변형을 지배한다. 그걸 빼면 판을 과도하게
+# 구속해 좌굴하중이 크게 과대평가된다 — 실측으로 SSSF 정사각에서 k=8.96 이 나왔는데
+# 문헌은 1.40 이다(**6.4배 비보수**). 자유변을 제대로 다루려면 다항식 기저의 다항 Ritz 가
+# 필요하고 그건 이 커널의 범위 밖이다. 그럴듯한 오답 대신 정직하게 거부한다.
+BEAM_PAIRS = ("SS", "CC", "CS")
+_PAIR_ALIAS = {"SC": "CS"}
+FREE_EDGE_NOTE = ("자유변(F)은 지원하지 않습니다 — 1항 Ritz 가 강체 모드를 놓쳐 좌굴하중을 "
+                  "크게 과대평가합니다(실측 SSSF 정사각에서 6.4배 비보수). S·C 만 쓰세요")
+# 하위호환 별칭 (기존 인자값)
+BOUNDARY_ALIAS = {"simply_supported": "SSSS", "clamped": "CCCC"}
 BOUNDARIES = ("simply_supported", "clamped")
+
 CC_LAMBDA_STEPS = 200      # 고정 이분 반복수
 CC_QUAD_NODES = 8001       # 고정 Simpson 노드수 (홀수)
 CLAMPED_MODE_LIMIT = 8     # 고차 모드는 cosh 가 커져 수치가 나빠진다
-_CC_CACHE: dict[int, tuple[float, float, float]] = {}
+_PQ_CACHE: dict[tuple[str, int], tuple[float, float, float]] = {}
 
 
-def _cc_eigenvalue(n: int) -> float:
-    """cos(λ)·cosh(λ) = 1 의 n번째 근. 1/cosh 형태로 써서 오버플로를 피한다."""
-    guess = (2 * n + 1) * math.pi / 2.0
+def normalize_boundary(boundary: str) -> tuple[str, str] | None:
+    """boundary 문자열 → (x변 쌍, y변 쌍). 알 수 없으면 None.
+
+    "simply_supported"·"clamped" 는 SSSS·CCCC 로 확장한다. 4글자 표기는
+    **앞 두 글자가 x 방향 두 변, 뒤 두 글자가 y 방향 두 변**이다
+    (예: "CCSS" = x 변 고정-고정, y 변 단순-단순).
+    """
+    if not isinstance(boundary, str):
+        return None
+    code = BOUNDARY_ALIAS.get(boundary, boundary).upper()
+    if len(code) != 4:
+        return None
+    px, py = code[:2], code[2:]
+    px, py = _PAIR_ALIAS.get(px, px), _PAIR_ALIAS.get(py, py)
+    if px not in BEAM_PAIRS or py not in BEAM_PAIRS:
+        return None
+    return px, py
+
+
+def _char_eq(pair: str, lam: float) -> float:
+    """보 특성방정식 f(λ)=0. 1/cosh 형태로 써서 오버플로를 피한다."""
+    sech = 0.0 if lam > 700.0 else 1.0 / math.cosh(lam)
+    if pair == "CC":
+        return math.cos(lam) - sech            # cos·cosh = 1
+    return math.tan(lam) - math.tanh(lam)      # CS: tan = tanh
+
+
+def _eigenvalue(pair: str, n: int) -> float:
+    """n번째 보 고유값 (고정 반복 이분법 — 결정론)."""
+    if pair == "SS":
+        return n * math.pi
+    if pair == "CS":
+        guess = (4 * n + 1) * math.pi / 4
+    else:
+        guess = (2 * n + 1) * math.pi / 2
     lo, hi = guess - 0.4, guess + 0.4
-
-    def f(x: float) -> float:
-        return math.cos(x) - (1.0 / math.cosh(x) if x < 700.0 else 0.0)
-
-    f_lo_neg = f(lo) < 0
+    f_lo_neg = _char_eq(pair, lo) < 0
     for _ in range(CC_LAMBDA_STEPS):
         mid = 0.5 * (lo + hi)
-        if (f(mid) < 0) == f_lo_neg:
+        if (_char_eq(pair, mid) < 0) == f_lo_neg:
             lo = mid
         else:
             hi = mid
     return 0.5 * (lo + hi)
 
 
-def clamped_pq(n: int) -> tuple[float, float]:
-    """고정-고정 보 n번째 모드의 (p, q) = (∫(φ')²/∫φ², ∫(φ'')²/∫φ²)."""
-    if n in _CC_CACHE:
-        lam, p, q = _CC_CACHE[n]
+def _shape_funcs(pair: str, lam: float):
+    """(phi, phi', phi'') — 각 경계조건의 정규화 전 고유함수."""
+    ch, co, sh, si = math.cosh, math.cos, math.sinh, math.sin
+    if pair == "SS":
+        return (lambda x: si(lam * x), lambda x: lam * co(lam * x),
+                lambda x: -lam * lam * si(lam * x))
+    sg = (ch(lam) - co(lam)) / (sh(lam) - si(lam))      # CC·CS 공통 형상
+    return (lambda x: ch(lam * x) - co(lam * x) - sg * (sh(lam * x) - si(lam * x)),
+            lambda x: lam * (sh(lam * x) + si(lam * x) - sg * (ch(lam * x) - co(lam * x))),
+            lambda x: lam ** 2 * (ch(lam * x) + co(lam * x) - sg * (sh(lam * x) + si(lam * x))))
+
+
+def beam_pq(pair: str, n: int) -> tuple[float, float]:
+    """(p, q) = (적분(phi')^2 / 적분 phi^2,  적분(phi'')^2 / 적분 phi^2).
+
+    Rayleigh 몫의 유일한 재료다. **q = lambda^4 가 S·C·F 어느 조합에서도 성립**하는데,
+    부분적분의 경계항이 S·C 양쪽에서 0이기 때문이다. 이 항등식이 수치적분의 독립 검증이 된다(테스트로 rel 1e-8 고정).
+    """
+    key = (pair, n)
+    if key in _PQ_CACHE:
+        _lam, p, q = _PQ_CACHE[key]
         return p, q
-    lam = _cc_eigenvalue(n)
-    sig = (math.cosh(lam) - math.cos(lam)) / (math.sinh(lam) - math.sin(lam))
-
-    def phi(x):
-        return math.cosh(lam * x) - math.cos(lam * x) - sig * (math.sinh(lam * x) - math.sin(lam * x))
-
-    def d1(x):
-        return lam * (math.sinh(lam * x) + math.sin(lam * x)
-                      - sig * (math.cosh(lam * x) - math.cos(lam * x)))
-
-    def d2(x):
-        return lam * lam * (math.cosh(lam * x) + math.cos(lam * x)
-                            - sig * (math.sinh(lam * x) + math.sin(lam * x)))
+    lam = _eigenvalue(pair, n)
+    if pair == "SS":
+        p, q = lam * lam, lam ** 4
+        _PQ_CACHE[key] = (lam, p, q)
+        return p, q
+    phi, d1, d2 = _shape_funcs(pair, lam)
 
     def simpson(fn):
         h = 1.0 / (CC_QUAD_NODES - 1)
@@ -160,23 +212,36 @@ def clamped_pq(n: int) -> tuple[float, float]:
 
     i0 = simpson(lambda x: phi(x) ** 2)
     p, q = simpson(lambda x: d1(x) ** 2) / i0, simpson(lambda x: d2(x) ** 2) / i0
-    _CC_CACHE[n] = (lam, p, q)
+    _PQ_CACHE[key] = (lam, p, q)
     return p, q
 
 
-def mode_pq(boundary: str, n: int) -> tuple[float, float]:
-    """경계조건·모드번호 → (p, q). 두 경계가 같은 식을 공유하게 하는 다리."""
-    if boundary == "clamped":
-        return clamped_pq(n)
-    a = n * math.pi
-    return a * a, a ** 4
+def clamped_pq(n: int) -> tuple[float, float]:
+    """고정-고정 보 (하위호환 별칭)."""
+    return beam_pq("CC", n)
+
+
+def _cc_eigenvalue(n: int) -> float:
+    """고정-고정 고유값 (하위호환 별칭)."""
+    return _eigenvalue("CC", n)
+
+
+def mode_pq(boundary: str, n: int, axis: int = 0) -> tuple[float, float]:
+    """경계조건·모드번호 → (p, q). 두 경계가 같은 Rayleigh 식을 공유하게 하는 다리.
+
+    axis: 0 = x 방향(앞 두 글자), 1 = y 방향(뒤 두 글자).
+    """
+    pairs = normalize_boundary(boundary)
+    if pairs is None:
+        raise ValueError(f"지원하지 않는 boundary: {boundary!r}")
+    return beam_pq(pairs[axis], n)
 
 
 def ritz_ncr(Dm: np.ndarray, a: float, b: float, load_ratio: float,
              boundary: str, m: int, n: int) -> float | None:
     """(m,n) 모드의 임계 하중. 압축이 지배하지 않으면 None."""
-    pf, qf = mode_pq(boundary, m)
-    pp, qq = mode_pq(boundary, n)
+    pf, qf = mode_pq(boundary, m, 0)
+    pp, qq = mode_pq(boundary, n, 1)
     denom = 1.0 + load_ratio * (a * a / (b * b)) * (pp / pf)
     if denom <= 0.0:
         return None
@@ -189,8 +254,8 @@ def ritz_ncr(Dm: np.ndarray, a: float, b: float, load_ratio: float,
 def ritz_omega2(Dm: np.ndarray, rho_areal: float, a: float, b: float,
                 boundary: str, m: int, n: int) -> float:
     """(m,n) 모드의 각진동수 제곱."""
-    pf, qf = mode_pq(boundary, m)
-    pp, qq = mode_pq(boundary, n)
+    pf, qf = mode_pq(boundary, m, 0)
+    pp, qq = mode_pq(boundary, n, 1)
     return (Dm[0, 0] * qf / a ** 4
             + 2.0 * (Dm[0, 1] + 2.0 * Dm[2, 2]) * pf * pp / (a * a * b * b)
             + Dm[1, 1] * qq / b ** 4) / rho_areal
@@ -219,7 +284,7 @@ def ritz_frequencies(Dm: np.ndarray, rho_areal: float, a: float, b: float,
                      boundary: str, n_modes: int, mode_scan: int) -> list[dict]:
     """경계조건별 고유진동수 (낮은 순 n_modes개). SS 를 넣으면 Navier 와 정확히 일치한다."""
     scan = max(int(mode_scan), int(n_modes))
-    if boundary == "clamped":
+    if normalize_boundary(boundary) != ("SS", "SS"):
         scan = min(scan, CLAMPED_MODE_LIMIT)
         scan = max(scan, min(int(n_modes), CLAMPED_MODE_LIMIT))
     out = []

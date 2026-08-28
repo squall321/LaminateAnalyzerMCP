@@ -72,6 +72,9 @@
       단계마다 잔류 재계산, 피로는 평균응력 이동. ΔT=−150K 에서 FPF −81%, 수명 8자릿수 감소
 - [x] ~~순응층 부분합성 굽힘~~ — v0.13.0 assess_partial_composite_bending (shear-lag 폐형해).
       UTG/OCA/UTG L=10mm 에서 CLT 2.03배 과대. 좌굴·진동수에 교차 게이트
+- [x] ~~임의 경계조건 Ritz~~ — v0.14.0 boundary 4글자 코드(S·C 조합 9종). SSSS 는 Navier
+      정해로 환원(rel 1e-12), q=λ⁴ 항등식으로 수치적분 독립 검증. 자유변은 강체 모드를
+      놓쳐 6.4배 비보수라 E100 거부. 상계 오차 CCCC +6.6% / SSCC +11.6% 를 W130 에 명시
 - [ ] (보류) 채널링 g(α,β) 보정표 — 수기 이식 리스크로 미탑재 유지 (계획서 §17.7.3)
 - [x] ~~기하 비선형 (V3)~~ — v0.8.0: compute_bistable_shapes(Hyer 쌍안정·임계 판 크기)
       + compute_large_deflection(von Karman, movable/immovable) + compute_postbuckling

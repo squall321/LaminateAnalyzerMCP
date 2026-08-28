@@ -5,12 +5,12 @@ SUPPORTED_UNIT_SYSTEMS = ("SI", "SI_mm")
 # 입력 → SI 변환 계수
 TO_SI = {
     "SI": {"modulus": 1.0, "length": 1.0, "density": 1.0, "load_n": 1.0, "load_m": 1.0,
-           "energy_area": 1.0, "shear_nl": 1.0},
+           "energy_area": 1.0, "shear_nl": 1.0, "diffusivity": 1.0},
     # MPa→Pa, mm→m, t/mm³→kg/m³, N/mm→N/m, M은 N·mm/mm = N·m/m 수치 동일,
     # 파괴인성 Γ: N/mm(=kJ/m²)→J/m²
     # S6666 [1/응력^3]: 1/MPa^3 → 1/Pa^3 = ×1e-18
     "SI_mm": {"modulus": 1.0e6, "length": 1.0e-3, "density": 1.0e12, "load_n": 1.0e3, "load_m": 1.0,
-              "energy_area": 1.0e3, "shear_nl": 1.0e-18},
+              "energy_area": 1.0e3, "shear_nl": 1.0e-18, "diffusivity": 1.0e-6},
 }
 
 # SI 결과 → 입력 단위계 표시 변환 계수

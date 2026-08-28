@@ -262,3 +262,38 @@ G = (ε_x²·h/2)·(E_LAM − E*), ε_c = √(2G_c/(h·ΔE)). 박리 길이에 �
   G_Ic 를 넣어 판정하고, 그 사실을 보고에 반드시 포함할 것.
 - 구동력은 경계층 평형 논증에서 나온 크기 규모 지표다 — 실제 자유 가장자리 응력은
   특이점을 갖는 3D 문제라 개시 계면이 다를 수 있다(W130).
+
+## 13. 물성 체인과 게이트 (v0.11.0)
+
+**ply 물성을 모를 때 — `derive_lamina_from_constituents(fiber, matrix, Vf)`**
+섬유+수지에서 직교이방 lamina 를 만든다. materialtwin 실측 수지 → 이 도구 → 적층 해석으로
+체인이 이어진다. **반드시 `bounds`(Reuss–Voigt)를 함께 보고할 것** — E2·G12 는 기지 지배라
+불확실성이 크다(AS4/3501-6 에서 G12 가 문헌 대비 42% 낮게 나온다). 실측이 있으면 그걸 쓰고,
+없으면 ξ 를 역보정하라.
+⚠ **`homogenize_layer` 를 UD ply 생성에 쓰지 말 것.** 등방 Voigt 병렬이라 섬유/수지에 넣으면
+E2 를 15배 과대, α2 를 260배 과소로 준다. 그 도구의 `scope` 필드가 용도를 명시한다.
+
+**흡습에 시간이 필요할 때 — `compute_moisture_uptake(laminate, diffusion, time_s?, mode?)`**
+τ = D·t/h² 하나가 지배한다 — **두께가 2배면 시간이 4배**다. `mode="desorption"` 이 베이크다.
+결과의 `delta_C_for_thermal_tool` 을 `compute_thermal_response(delta_C=...)` 에 그대로 넘겨라.
+
+**경계조건 — `boundary="clamped"`**
+`compute_buckling`·`compute_natural_frequencies` 가 지원한다. 실제 패널이 고정단에 가까우면
+N_cr 이 2.5배 달라진다. **단 고정단 좌굴값은 1항 Ritz 상계라 +6.6% 비보수다** — SS 값을 하한으로
+함께 보고해 참값을 감싸라. 진동수는 정확도가 좋다(고정/SS 비 1.829 vs 문헌 1.83).
+`panel` 에 `Lx`/`Ly` 외의 키를 넣으면 E100 이다 — 경계조건은 `boundary` 인자로 준다.
+
+## 14. 반드시 함께 봐야 하는 조합 (조용한 오답 방지)
+
+이 서버가 **자신 있게 답하는데 틀릴 수 있는** 자리들이다. 실측으로 확인된 것만 적는다.
+
+| 상황 | 단독 호출이 주는 답 | 실제 | 대응 |
+|---|---|---|---|
+| **면내 압축** | `recover_ply_stresses` 가 R=7.07 "7배 여유" | 좌굴 여유 0.017 (**410배 모순**) | `panel` 을 함께 주면 `governing_mode` 가 정렬해 준다. 안 주면 W130 |
+| **대칭 적층 가열** | `compute_thermal_response` warpage 7e-16 "무시 가능" | 면내 구속 시 **ΔT_cr = 24.9 K** | `panel` 을 주면 `restrained_buckling` 이 나온다 |
+| **면내 인장 + 각도 차 큰 계면** | 면내 R=1.33 "33% 여유" | 가장자리 개시 여유 0.91 | `assess_free_edge_delamination` |
+| **전단 지배 적층** | `solve_load_response` 선형 Ex | 실제 Ex 61% | `solve_nonlinear_shear_response` |
+| **얇은 비대칭 적층 냉각** | 선형 안장 곡률 | 원통 두 개로 분기 | `compute_bistable_shapes` |
+
+압축 하중을 받으면 **강도만 보고하지 말 것.** 열해석에서 "휨 없음"이 나오면 **구속 조건을 확인할 것.**
+

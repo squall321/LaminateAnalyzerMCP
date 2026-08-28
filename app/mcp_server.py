@@ -189,7 +189,8 @@ def assess_crack_shielding(laminate: dict, target_ply: int, fracture: dict | Non
 
 @mcp.tool()
 def recover_ply_stresses(laminate: dict, loads: dict | None = None,
-                         delta_T: float | None = None, detail: str = "auto") -> dict:
+                         delta_T: float | None = None, detail: str = "auto",
+                         panel: dict | None = None) -> dict:
     """층별 응력 복원 + (강도 있으면) 파손 판정 — first-ply-failure와 여유율까지.
 
     loads = {"N":[Nx,Ny,Nxy], "M":[Mx,My,Mxy]} (단위 폭당), delta_T [K]를 주면 열하중 중첩
@@ -198,8 +199,13 @@ def recover_ply_stresses(laminate: dict, loads: dict | None = None,
     (하중 R배에서 파손 — R>1 안전)과 Max Stress 지배 모드(섬유/횡/전단)를 함께 반환.
     first_ply_failure = 전 ply 최소 R. 강도는 materialtwin property registry에서 조달 가능.
     detail: "auto"(기본 — 32ply 초과 시 임계 상위 10개만+truncation note) | "full" | "summary".
+    **압축 하중이면 panel={"Lx","Ly"} 를 함께 주라.** 얇은 판은 강도 여유가 충분해도 좌굴이
+    먼저 온다 — 실측으로 [0/90]s 0.5mm 에 Nx=−60 N/mm 일 때 강도 R=7.07("7배 여유")인데
+    같은 판의 좌굴 여유는 0.017 이었다(410배 모순). panel 을 주면 governing_mode 로
+    강도·좌굴 여유를 같은 척도로 정렬해 지배 모드를 알려준다. 없으면 W130 으로 경고만 한다.
     """
-    return _guarded(PIPE.run_ply_stresses, laminate, loads=loads, delta_t=delta_T, detail=detail)
+    return _guarded(PIPE.run_ply_stresses, laminate, loads=loads, delta_t=delta_T,
+                    detail=detail, panel=panel)
 
 
 @mcp.tool()
@@ -215,29 +221,39 @@ def check_design_rules(laminate: dict, contiguity_limit: int = 4) -> dict:
 
 @mcp.tool()
 def compute_buckling(laminate: dict, panel: dict, load_ratio: float = 0.0,
-                     applied_Nx: float | None = None) -> dict:
-    """단순지지 직교이방 판의 좌굴 임계하중 N_cr (Navier 폐형해, m·n=1..10 스캔).
+                     applied_Nx: float | None = None,
+                     boundary: str = "simply_supported") -> dict:
+    """직교이방 판의 좌굴 임계하중 N_cr.
 
-    panel = {"Lx","Ly"} (길이 단위). 2축 압축 지원: load_ratio = Ny/Nx (압축 양수), Nxy 미지원.
-    applied_Nx(압축 크기)를 주면 margin.factor = N_cr/Nx. 비대칭 적층은 축소강성 D*로 근사(W130),
-    D16/D26 유의 시 비보수 가능성 경고(W130). 경량화 탐색의 두께 하한 판단용.
+    panel = {"Lx","Ly"} (길이 단위 — 다른 키를 넣으면 E100). 2축 압축: load_ratio = Ny/Nx
+    (압축 양수), Nxy 미지원. applied_Nx(압축 크기)를 주면 margin.factor = N_cr/Nx.
+    **boundary**: "simply_supported"(기본, Navier 폐형해 m·n=1..10 스캔) |
+    "clamped"(고정단 4변, 1항 Rayleigh–Ritz). 실제 패널은 고정단에 가까운 경우가 많고
+    N_cr 이 2.5배 이상 달라진다 — 다만 Ritz 는 **상계**라 고정단 값은 비보수다(W130).
+    두 값을 함께 보면 참값을 감싼다(SS = 하한, clamped = 상계 추정).
+    비대칭 적층은 축소강성 D*로 근사(W130), D16/D26 유의 시 경고(W130).
     횡전단 유연성이 유의하면(R_s>0.02) corrected_N_cr(1차 FSDT 보정)을 함께 반환한다.
     """
     return _guarded(PIPE.run_buckling, laminate, panel=panel, load_ratio=load_ratio,
+                    boundary=boundary,
                     applied_Nx=applied_Nx)
 
 
 @mcp.tool()
-def compute_natural_frequencies(laminate: dict, panel: dict, n_modes: int = 5) -> dict:
-    """단순지지 직교이방 판의 고유진동수 [Hz] (Navier 폐형해, 낮은 순 n_modes개).
+def compute_natural_frequencies(laminate: dict, panel: dict, n_modes: int = 5,
+                                boundary: str = "simply_supported") -> dict:
+    """직교이방 판의 고유진동수 [Hz] (낮은 순 n_modes개).
 
     전 ply에 밀도(rho)가 필요하다. panel = {"Lx","Ly"}. NVH·공진 회피 1차 판단용.
+    **boundary**: "simply_supported"(기본, Navier 폐형해) | "clamped"(1항 Rayleigh–Ritz).
+    등방 정사각 1차 모드에서 고정/SS 비 1.829 (문헌 1.83) — 진동수는 정확도가 좋다.
     전 ply에 loss_factor(η)가 있으면 모달 감쇠(MSE법)와 Q factor를 함께 반환한다.
     횡전단 유연성 R_s = π²D11/(A55a²)도 함께 계산 — 0.02 초과면 CLT가 비보수적이므로
     W130과 1차 보정값(corrected_f1_hz)을 병기한다(두꺼운 판·샌드위치 판단 근거).
     비대칭 D* 근사·D16/D26 유의성은 W130으로 경고. 경계조건은 4변 단순지지 고정.
     """
-    return _guarded(PIPE.run_frequencies, laminate, panel=panel, n_modes=n_modes)
+    return _guarded(PIPE.run_frequencies, laminate, panel=panel, n_modes=n_modes,
+                    boundary=boundary)
 
 
 @mcp.tool()
@@ -378,6 +394,50 @@ def assess_free_edge_delamination(laminate: dict, loads: dict,
     근거한 크기 규모 지표이지 응력장이 아니다 — 실제는 특이점을 갖는 3D 문제다.
     """
     return _guarded(PIPE.run_free_edge_delamination, laminate, loads=loads, fracture=fracture)
+
+
+@mcp.tool()
+def derive_lamina_from_constituents(fiber: dict, matrix: dict, fiber_volume_fraction: float,
+                                    model: str = "halpin_tsai",
+                                    xi_E2: float | None = None,
+                                    xi_G12: float | None = None) -> dict:
+    """섬유+수지 → lamina 직교이방 물성. ply 물성을 모를 때 체인의 시작점.
+
+    homogenize_layer 는 등방 병렬 혼합이라 동박층 같은 혼합층 전용이다 — 이 도구가
+    섬유/수지에서 E1·E2·G12·ν12(+α1·α2·ρ)를 만든다. materialtwin 에서 수지 실측을
+    가져와 여기에 넣으면 적층 해석까지 체인이 이어진다.
+    fiber = {E1, E2, G12, nu12, alpha1?, alpha2?, rho?} (횡등방 섬유),
+    matrix = {E, nu, alpha?, rho?} (등방 수지), fiber_volume_fraction ∈ (0,1].
+    model: "halpin_tsai"(기본) | "chamis". xi_E2(기본 2)·xi_G12(기본 1)로 보정 가능.
+    **단위계 무관** — 출력 단위는 입력과 동일하다.
+    반환 material 을 laminae[].material 에 그대로 넣어 쓴다(source=estimated 로 추적됨).
+    주의: E1·ν12는 섬유 지배라 신뢰도가 높지만 **E2·G12는 기지 지배라 불확실성이 크다**
+    (W120). 함께 반환되는 Reuss–Voigt bounds 가 추정의 폭이니 사용자에게 함께 전할 것.
+    """
+    try:
+        return PIPE.run_micromechanics(fiber, matrix, fiber_volume_fraction, model=model,
+                                       xi_E2=xi_E2, xi_G12=xi_G12)
+    except Exception as e:  # noqa: BLE001
+        return ENV.build(data=None, errors=[item("E501", detail=type(e).__name__)],
+                         warnings=[], payload={"fiber": fiber if isinstance(fiber, dict) else {}})
+
+
+@mcp.tool()
+def compute_moisture_uptake(laminate: dict, diffusion: dict, time_s: float | None = None,
+                            mode: str = "absorption") -> dict:
+    """흡습에 **시간 축**을 준다 — "며칠이면 포화하나", "베이크 몇 시간" 에 답한다.
+
+    compute_thermal_response 는 흡습 변형(delta_C)만 다루고 시간이 없다. 이 도구가
+    Fickian 확산으로 시간↔수분율을 이어 준다 — 결과의 delta_C 를 그대로 넘기면 된다.
+    diffusion = {"D": 확산계수(길이²/s — SI: m²/s, SI_mm: mm²/s), "M_inf": 포화 수분율[%M]}
+    또는 Arrhenius로 {"D0","Ed"(J/mol),"temperature_K","M_inf"}.
+    time_s 를 주면 그 시점의 수분율과 두께방향 분포까지, 없으면 특성시간(t50/t90/t99)만.
+    mode: "absorption"(기본) | "desorption"(베이크 — M_inf 를 초기 수분율로 보고 남은 양).
+    **τ = D·t/h² 하나가 지배한다 — 두께가 2배면 시간이 4배다.**
+    주의: Fickian 단순 확산 가정이고 D·M_inf 는 실측이어야 한다(W120/W130).
+    """
+    return _guarded(PIPE.run_moisture_uptake, laminate, diffusion=diffusion,
+                    time_s=time_s, mode=mode)
 
 
 @mcp.tool()

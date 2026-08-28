@@ -58,6 +58,14 @@
 - [x] ~~자유 가장자리 박리~~ — v0.10.0 assess_free_edge_delamination (O'Brien ERR 폐형해 +
       계면별 지배 구동력 peel/τyz/τxz). 면내 R=1.33 통과 케이스가 가장자리 여유 0.91 로
       뒤집히는 것을 실측 확인. 도구 26종, 테스트 299
+- [x] ~~미시역학~~ — v0.11.0 derive_lamina_from_constituents (ROM·Halpin–Tsai·Chamis·Schapery,
+      ξ 극한이 Reuss/Voigt 와 정확히 일치). homogenize_layer 오용 역게이트 동반
+- [x] ~~수분 확산 동역학~~ — v0.11.0 compute_moisture_uptake (Fickian 해석해, 흡습/베이크,
+      두께방향 분포, delta_C 체인). τ_50 = 0.0492 문헌 일치
+- [x] ~~경계조건 확장~~ — v0.11.0 boundary='clamped' (1항 Rayleigh–Ritz). SS 환원 rel 1e-12,
+      등방 정사각 k=10.74(정해 10.07 대비 상계 +6.6%)를 W130으로 명시
+- [x] ~~지배 파손모드 게이트~~ — v0.11.0 압축 하중 좌굴 침묵 봉쇄(실측 410배 모순),
+      열 구속 좌굴 ΔT_cr, panel 미지 키 침묵 차단, 자유단 W130 이 신규 도구 지목
 - [ ] (보류) 채널링 g(α,β) 보정표 — 수기 이식 리스크로 미탑재 유지 (계획서 §17.7.3)
 - [x] ~~기하 비선형 (V3)~~ — v0.8.0: compute_bistable_shapes(Hyer 쌍안정·임계 판 크기)
       + compute_large_deflection(von Karman, movable/immovable) + compute_postbuckling

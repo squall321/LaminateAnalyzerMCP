@@ -531,7 +531,7 @@ def run_thermal(payload, delta_t=None, panel=None, delta_c=None,
     if panel is not None:
         if _panel_to_si(panel, si.unit_system)[0] is None:
             return ENV.build(data=None, errors=[item("E100", field="panel",
-                                                     detail="panel은 {\"Lx\": >0, \"Ly\": >0} (유한 양수, 길이 단위) 여야 합니다")],
+                                                     detail="panel은 {\"Lx\": >0, \"Ly\": >0} 만 허용합니다 (유한 양수, 길이 단위). 경계조건은 panel 이 아니라 boundary 인자로 주세요")],
                              warnings=warnings, payload=payload, unit_system=si.unit_system,
                              include_debug=include_debug, t0=t0)
 
@@ -627,8 +627,49 @@ def run_thermal(payload, delta_t=None, panel=None, delta_c=None,
                                         f"실제 곡률은 이보다 작고, 비대칭 적층이면 형상이 안장이 아니라 "
                                         f"원통 두 개로 분기할 수 있다. compute_bistable_shapes 로 확인할 것"))
 
+    # §19.7 구속 게이트 — 자유 경계만 풀면 대칭 적층은 κ≈0 이라 "열변형 무시 가능"으로 읽힌다.
+    # 그런데 면내가 구속되면 같은 ΔT 가 압축을 만들어 좌굴한다. 반력 N^T 는 이미 손에 있다.
+    # 실측: [±45/0/90]s 1.0mm·ΔT=+100·200×200 → warpage 7.1e-16 mm·경고 0건 인데
+    # 완전구속 ΔT_cr = 49.7 K (2배 초과). [0/90]s 0.5mm 는 ΔT_cr = 7.7 K.
+    data["thermal_loads"] = {
+        "N_thermal": (N_f * f["A"]).tolist(),
+        "M_thermal": (M_f * f["load_m"]).tolist(),
+        "definition": ("자유변형이 만드는 합력·합모멘트. **면내를 완전 구속하면 반력 N = −N_thermal "
+                       "이 그대로 작용한다** — 팽창이면 압축이라 좌굴을 유발한다"),
+    }
+    n_restr = -N_f                       # 완전 면내 구속 시 실제로 작용하는 하중
+    if panel is not None and float(n_restr[0]) < 0.0:
+        from app.solver import plate_navier as NAV
+        d_use, _appl, _hh, _kk = _bending_stiffness_for_navier(si, warnings)
+        ratio = float(n_restr[1] / n_restr[0]) if n_restr[0] != 0.0 else 0.0
+        bres = NAV.buckling_ncr(d_use, lx_si, ly_si, ratio)
+        if bres["N_cr"] is not None:
+            factor = bres["N_cr"] / abs(float(n_restr[0]))
+            blk = {
+                "N_cr": bres["N_cr"] * f["A"],
+                "restrained_Nx": float(n_restr[0]) * f["A"],
+                "load_factor_to_buckling": factor,
+                "mode": {"m": bres["mode_m"], "n": bres["mode_n"]},
+                "definition": ("면내 **완전 구속** 극단. load_factor = N_cr/|N_구속| — 1보다 작으면 "
+                               "이 ΔT/ΔC 에서 이미 좌굴한다. 실제 구속은 자유와 완전구속 사이다"),
+            }
+            if dT != 0.0 and dC == 0.0:
+                blk["delta_T_critical"] = abs(dT) * factor
+            data["restrained_buckling"] = blk
+            if factor < 1.0:
+                warnings.append(item("W130", field="restrained_buckling",
+                                     detail=f"자유 경계 해는 휨이 거의 없다고 답하지만, **면내가 구속되면 "
+                                            f"이 조건에서 이미 좌굴한다**(N_cr/|N_구속| = {factor:.3g})."
+                                            + (f" ΔT_cr ≈ {blk['delta_T_critical']:.3g} K." if 'delta_T_critical' in blk else "")
+                                            + " 실제 구속 정도를 확인하고 compute_buckling 으로 상세 판정할 것"))
+            elif factor < 3.0:
+                warnings.append(item("W130", field="restrained_buckling",
+                                     detail=f"면내 완전 구속 시 좌굴 여유가 {factor:.3g} 배로 얇다 — "
+                                            f"구속 조건을 확인할 것"))
+
     extra = [
         "자유변형 해석 가정: 선형 CTE/CME(온도·수분 무관 — Tg 이상 α 급변 미반영), 자유 경계·소변형",
+        "thermal_loads 는 자유변형 합력이다 — 면내 구속 시 반력이 되어 좌굴을 유발할 수 있다",
         "delta_T = T_현재 − T_무응력기준, delta_C = 수분함량 변화 [%M]",
         *_source_assumptions(si),
     ]
@@ -686,9 +727,33 @@ def run_homogenize(components, include_debug: bool = False) -> dict:
         "model": "voigt_in_plane",
         "definition": "E=Σf·E, ν=Σf·ν, α=Σf·E·α/Σf·E (힘 평형 가중), ρ=Σf·ρ",
         "note": "면내 병렬(Voigt) 상한 모델 — 동박층 = {Cu f=동박률, 수지 f=1−동박률}. 단위는 입력 그대로",
+        "scope": ("**동일 평면을 함께 잇는 혼합층 전용**이다(동박/수지처럼 두 상이 모두 면내로 "
+                  "이어진 경우). 섬유/수지처럼 한 상이 방향성을 갖는 UD ply 에는 쓰면 안 된다 — "
+                  "횡방향이 직렬 결합이라 E2·G12·α2 가 크게 틀린다. UD ply 물성은 "
+                  "derive_lamina_from_constituents 를 쓸 것"),
     }
-    return ENV.build(data=data, errors=[], warnings=[], payload={"components": components},
-                     assumptions_extra=["균질화: Voigt(등변형) 상한 — 면내 강성·CTE 1차 근사"],
+    # 역게이트 — 이 도구는 **동일 평면을 함께 잇는 혼합층**(동박/수지) 전용이다.
+    # 섬유/수지처럼 한 상이 방향성을 가지면 횡방향은 직렬 결합이라 Voigt 가 크게 틀린다.
+    # 적대 검증 실측: T300 60% + 에폭시 → E2 를 9 GPa 대신 139 GPa(15배), α2 를 28e-6 대신
+    # 1.08e-7(260배 과소)로 주면서 경고 0건이었다. 이름이 "균질화"라 오용되기 쉽다.
+    #
+    # 입력만으로 "동일 평면인가"를 판별할 수는 없다(둘 다 등방 물성 + 체적률로 들어온다).
+    # 그래서 용도는 data["scope"] 로 **항상** 명시하고, 경고는 섬유/수지가 거의 확실한
+    # 매우 큰 강성비에만 건다 — 문턱을 낮추면 이 도구의 정당한 주용도인 동박층(비 ≈33)이
+    # 매번 경고를 받아 경고 피로가 생긴다.
+    warn = []
+    e_vals = [pp[1] for pp in parsed]
+    ratio = max(e_vals) / min(e_vals) if min(e_vals) > 0 else 1.0
+    if ratio > 50.0:
+        warn.append(item("W130", field="components",
+                         detail=f"구성재 탄성계수 비가 {ratio:.3g} 로 매우 크다 — 섬유/수지 조합이라면 "
+                                f"**이 도구를 쓰면 안 된다**. Voigt 병렬은 동박층처럼 같은 평면을 "
+                                f"함께 잇는 혼합층 전용이고, 섬유/수지는 횡방향이 직렬 결합이라 "
+                                f"E2·G12·α2 가 크게 틀린다(실측 E2 15배 과대, α2 260배 과소). "
+                                f"UD ply 물성은 derive_lamina_from_constituents 를 쓸 것"))
+    return ENV.build(data=data, errors=[], warnings=warn, payload={"components": components},
+                     assumptions_extra=["균질화: Voigt(등변형) 상한 — 면내 강성·CTE 1차 근사",
+                                        "동일 평면 혼합층 전용 — 섬유/수지에는 쓰지 말 것"],
                      include_debug=include_debug, t0=t0)
 
 
@@ -795,7 +860,7 @@ def run_crack_assessment(payload, target_ply, fracture=None, include_debug: bool
 
 
 def run_ply_stresses(payload, loads=None, delta_t=None, detail: str = "auto",
-                     include_debug: bool = False) -> dict:
+                     panel=None, include_debug: bool = False) -> dict:
     """층별 기계(+선택 열) 응력 복원과 파손 판정 (recover_ply_stresses Tool, §17.4).
 
     강도(strength)가 있는 ply는 Tsai-Wu 강도비 R·Max Stress 모드까지, 없는 ply는 응력만.
@@ -914,13 +979,19 @@ def run_ply_stresses(payload, loads=None, delta_t=None, detail: str = "auto",
         data["note"] = f"laminae{no_strength}는 strength 미입력 — 응력만 복원(파손 판정 제외). " \
                        f"강도는 material.strength {{Xt,Xc,Yt,Yc,S}}로 입력"
 
+    # §19.6 지배모드 게이트 — 압축이면 좌굴이 먼저 올 수 있다(실측 최대 410배 모순)
+    gov = _stability_gate(si, N_si, panel, warnings,
+                          r_strength=(fpf[0] if fpf is not None else None))
+    if gov is not None:
+        data["governing_mode"] = gov
+
     extra = [
         "파손 판정: Tsai-Wu(F12=-0.5√(F11F22) 표준 상호작용) 강도비 R 주지표 + Max Stress 지배 모드",
         "응력은 각 ply의 bottom/mid/top 3점 (ply 내 z 선형)",
         *(["열하중 중첩: 선형 CTE, 자유 경계 (§17.1 가정 동일)"] if dT != 0.0 else []),
         *_source_assumptions(si),
     ]
-    hash_payload = {"laminate": payload, "loads": loads, "delta_T": delta_t}
+    hash_payload = {"laminate": payload, "loads": loads, "delta_T": delta_t, "panel": panel}
     if ENV.contains_nan_inf(data):
         return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warnings,
                          payload=hash_payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
@@ -952,11 +1023,21 @@ def _bending_stiffness_for_navier(si, warnings) -> tuple:
     return D_use, {"reduced_stiffness_used": reduced, "bend_twist_ratio": bt}, h, K_hat
 
 
+PANEL_KEYS = ("Lx", "Ly")
+
+
 def _panel_to_si(panel, us):
-    """panel {"Lx","Ly"} → SI 길이. 형식·유한성·양수 위반 시 (None, None) (EDGE-01)."""
+    """panel {"Lx","Ly"} → SI 길이. 형식·유한성·양수 위반 시 (None, None) (EDGE-01).
+
+    **미지 키는 조용히 무시하지 않는다.** 적대 검증에서 panel={"Lx","Ly","edge_condition"}
+    과 panel={"Lx","Ly","typo_Lx":999} 가 둘 다 status=ok 로 통과했다 — 에이전트는 고정단을
+    요청했다고 믿고 단순지지 값을 보고하게 된다. 지원하지 않는 키가 있으면 실패시킨다.
+    """
     if not (isinstance(panel, dict)
             and all(isinstance(panel.get(k), (int, float)) and not isinstance(panel.get(k), bool)
-                    and math.isfinite(panel.get(k)) and panel.get(k) > 0 for k in ("Lx", "Ly"))):
+                    and math.isfinite(panel.get(k)) and panel.get(k) > 0 for k in PANEL_KEYS)):
+        return None, None
+    if set(panel) - set(PANEL_KEYS):
         return None, None
     f_len = units.TO_SI[us]["length"]
     return panel["Lx"] * f_len, panel["Ly"] * f_len
@@ -1002,8 +1083,8 @@ def run_design_rules(payload, contiguity_limit: int = 4, include_debug: bool = F
 
 
 def run_buckling(payload, panel, load_ratio: float = 0.0, applied_Nx=None,
-                 include_debug: bool = False) -> dict:
-    """단순지지 직교이방 판 좌굴 임계 (compute_buckling Tool, §17.5.2)."""
+                 boundary: str = "simply_supported", include_debug: bool = False) -> dict:
+    """직교이방 판 좌굴 임계 (compute_buckling Tool, §17.5.2 · 경계조건 확장 §19.5)."""
     from app.solver import plate_navier as NAV
     t0 = time.perf_counter()
     si, errors, warnings = VAL.validate_and_convert(payload)
@@ -1014,7 +1095,7 @@ def run_buckling(payload, panel, load_ratio: float = 0.0, applied_Nx=None,
     a, b = _panel_to_si(panel, si.unit_system)
     if a is None:
         return ENV.build(data=None, errors=[item("E100", field="panel",
-                                                 detail="panel은 {\"Lx\": >0, \"Ly\": >0} (길이 단위) 여야 합니다")],
+                                                 detail="panel은 {\"Lx\": >0, \"Ly\": >0} 만 허용합니다 (길이 단위). 지원하지 않는 키가 있으면 조용히 무시하지 않고 실패시킵니다 — 경계조건은 boundary 인자로 주세요")],
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
     if (not isinstance(load_ratio, (int, float)) or isinstance(load_ratio, bool)
@@ -1031,8 +1112,18 @@ def run_buckling(payload, panel, load_ratio: float = 0.0, applied_Nx=None,
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
 
+    if boundary not in NAV.BOUNDARIES:
+        return ENV.build(data=None, errors=[item("E100", field="boundary",
+                                                 detail=f"boundary는 {list(NAV.BOUNDARIES)} 중 하나여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
     D_use, appl, h, _ = _bending_stiffness_for_navier(si, warnings)
-    res = NAV.buckling_ncr(D_use, a, b, float(load_ratio))
+    if boundary == "clamped":
+        res = NAV.scan_ritz_buckling(D_use, a, b, float(load_ratio), boundary,
+                                     NAV.CLAMPED_MODE_LIMIT)
+    else:
+        res = NAV.buckling_ncr(D_use, a, b, float(load_ratio))
     if res["N_cr"] is None:
         # 압축 지배 모드가 없음(과도한 음수 load_ratio) — 내부 오류가 아니라 입력 문제 (NAV-1)
         return ENV.build(data=None, errors=[item("E100", field="load_ratio",
@@ -1047,9 +1138,16 @@ def run_buckling(payload, panel, load_ratio: float = 0.0, applied_Nx=None,
         warnings.append(item("W130", field="buckling.mode",
                              detail=f"임계 모드가 스캔 상한({res['mode_scan']})에 걸렸습니다 — "
                                     f"N_cr이 비보수적으로 과대평가되었을 수 있습니다"))
+    if boundary == "clamped":
+        warnings.append(item("W130", field="boundary",
+                             detail="고정단은 폐형해가 없어 1항 Rayleigh–Ritz 로 푼다 — **상계**라 "
+                                    "N_cr 을 과대평가한다(등방 정사각에서 k=10.74 vs 정해 10.07, "
+                                    "+6.6%로 비보수). 보수적 판정이 필요하면 "
+                                    "boundary='simply_supported' 값을 하한으로 함께 볼 것"))
     f = units.FROM_SI[si.unit_system]
     data = {
         "N_cr": res["N_cr"] * f["A"],
+        "boundary": boundary,
         "mode": {"m": res["mode_m"], "n": res["mode_n"], "scan_limit": res["mode_scan"],
                  "at_scan_boundary": bool(res.get("boundary"))},
         "load_ratio_Ny_over_Nx": float(load_ratio),
@@ -1072,8 +1170,9 @@ def run_buckling(payload, panel, load_ratio: float = 0.0, applied_Nx=None,
                      include_debug=include_debug, t0=t0)
 
 
-def run_frequencies(payload, panel, n_modes: int = 5, include_debug: bool = False) -> dict:
-    """단순지지 직교이방 판 고유진동수 (compute_natural_frequencies Tool, §17.5.2)."""
+def run_frequencies(payload, panel, n_modes: int = 5, boundary: str = "simply_supported",
+                    include_debug: bool = False) -> dict:
+    """직교이방 판 고유진동수 (compute_natural_frequencies Tool, §17.5.2 · 경계조건 확장 §19.5)."""
     from app.solver import plate_navier as NAV
     t0 = time.perf_counter()
     si, errors, warnings = VAL.validate_and_convert(payload)
@@ -1084,7 +1183,7 @@ def run_frequencies(payload, panel, n_modes: int = 5, include_debug: bool = Fals
     a, b = _panel_to_si(panel, si.unit_system)
     if a is None:
         return ENV.build(data=None, errors=[item("E100", field="panel",
-                                                 detail="panel은 {\"Lx\": >0, \"Ly\": >0} (길이 단위) 여야 합니다")],
+                                                 detail="panel은 {\"Lx\": >0, \"Ly\": >0} 만 허용합니다 (길이 단위). 지원하지 않는 키가 있으면 조용히 무시하지 않고 실패시킵니다 — 경계조건은 boundary 인자로 주세요")],
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
     if not isinstance(n_modes, int) or isinstance(n_modes, bool) or not (1 <= n_modes <= 25):
@@ -1099,10 +1198,23 @@ def run_frequencies(payload, panel, n_modes: int = 5, include_debug: bool = Fals
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
 
+    if boundary not in NAV.BOUNDARIES:
+        return ENV.build(data=None, errors=[item("E100", field="boundary",
+                                                 detail=f"boundary는 {list(NAV.BOUNDARIES)} 중 하나여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
     D_use, appl, h, _ = _bending_stiffness_for_navier(si, warnings)
     rho_areal = sum(p_.rho * p_.thickness for p_ in si.plies)   # SI kg/m²
     scan = max(NAV.MODE_SCAN, n_modes)      # f는 m·n 단조 증가 → scan ≥ n_modes면 상위 정확 (NAV-3)
-    modes = NAV.natural_frequencies(D_use, rho_areal, a, b, n_modes, mode_scan=scan)
+    if boundary == "clamped":
+        modes = NAV.ritz_frequencies(D_use, rho_areal, a, b, boundary, n_modes, scan)
+        warnings.append(item("W130", field="boundary",
+                             detail="고정단은 1항 Rayleigh–Ritz 근사다 — 주파수를 약간 과대평가한다. "
+                                    "등방 정사각 1차 모드에서 고정/SS 비 1.829 (문헌 1.83)로 정확도가 "
+                                    "좋지만 고차 모드일수록 오차가 커진다"))
+    else:
+        modes = NAV.natural_frequencies(D_use, rho_areal, a, b, n_modes, mode_scan=scan)
 
     # 모달 감쇠 (§17.6.2) — 전 ply에 loss_factor가 있을 때만, 1차 모드 정합 (MSE-01/02)
     from app.solver import interlaminar as IL
@@ -1368,9 +1480,12 @@ def run_interlaminar(payload, shear=None, detail: str = "auto",
         mism.sort(key=lambda m: -(m["stiffness_mismatch"] + m["angle_jump_deg"] / 90.0))
         data["free_edge_risk_ranking"] = mism[:5]
         data["free_edge_note"] = ("정성 순위 — 자유단 층간응력은 각도 점프·강성 불일치가 클수록 집중된다. "
-                                  "정량 예측은 3D 해석 필요")
+                                  "**정량 판정은 assess_free_edge_delamination 을 쓸 것** "
+                                  "(O'Brien ERR 폐형해 + 계면별 지배 구동력)")
         warnings.append(item("W130", field="free_edge_risk_ranking",
-                             detail="자유단 박리는 CLT 평형법으로 정량화되지 않습니다 (순위는 정성 지표)"))
+                             detail="자유단 박리는 이 도구(CLT 평형법)로는 정량화되지 않습니다 — 순위는 "
+                                    "정성 지표다. 정량 판정은 assess_free_edge_delamination "
+                                    "(O'Brien ERR + 계면별 구동력)을 호출할 것"))
 
     hash_payload = {"laminate": payload, "shear": shear}
     if ENV.contains_nan_inf(data):
@@ -2077,6 +2192,68 @@ def run_nonlinear_shear(payload, loads=None, include_debug: bool = False) -> dic
                      include_debug=include_debug, t0=t0)
 
 
+def _stability_gate(si, n_si, panel, warnings, r_strength=None):
+    """압축 하중일 때 좌굴을 함께 보게 만드는 지배모드 게이트 (§19.6).
+
+    적대 검증 실측: [0/90]s h=0.5mm 에 Nx=−60 N/mm 를 걸면 recover_ply_stresses 가
+    Tsai-Wu R = 7.07 · 경고 0건 으로 "7배 여유"라고 답하는데, 같은 적층·같은 하중의
+    150×150 판은 N_cr = 1.04 N/mm 라 **이미 58배 초과**다(모순 배율 410). 준등방 1mm
+    판에서도 61배가 재현된다. 두 응답 어느 쪽도 상대를 언급하지 않았다 — 강도 도구가
+    표준 진입점이라 압축 질문은 구조적으로 이 경로로 들어온다.
+
+    반환: (governing 블록 또는 None). 경고는 warnings 에 덧붙인다.
+    """
+    from app.solver import plate_navier as NAV
+    nx, ny = float(n_si[0]), float(n_si[1])
+    if nx >= 0.0 and ny >= 0.0:
+        return None                     # 압축 성분이 없으면 좌굴은 무관하다
+    if panel is None:
+        warnings.append(item("W130", field="loads.N",
+                             detail="면내 **압축**이 걸려 있는데 panel 이 없어 좌굴을 확인할 수 없다. "
+                                    "얇은 판은 강도 여유가 충분해도 좌굴이 먼저 온다(실측 최대 410배 "
+                                    "모순) — panel={\"Lx\",\"Ly\"} 를 주거나 compute_buckling 을 "
+                                    "반드시 함께 호출할 것"))
+        return None
+    lx, ly = _panel_to_si(panel, si.unit_system)
+    if lx is None:
+        return None
+    if nx >= 0.0:
+        warnings.append(item("W130", field="loads.N",
+                             detail="y방향만 압축이다 — 이 게이트는 Nx 압축 기준이라 좌굴 순위를 "
+                                    "내지 않았다. 축을 바꿔 compute_buckling 을 직접 호출할 것"))
+        return None
+    d_use, _appl, _h, _k = _bending_stiffness_for_navier(si, warnings)
+    ratio = ny / nx if nx != 0.0 else 0.0
+    res = NAV.buckling_ncr(d_use, lx, ly, ratio)
+    if res["N_cr"] is None:
+        return None
+    r_buckling = res["N_cr"] / abs(nx)
+    modes = {"buckling": r_buckling}
+    if r_strength is not None:
+        modes["strength"] = r_strength
+    name = min(modes, key=lambda k: modes[k])
+    gov = {
+        "governing_mode": name,
+        "margin": modes[name],
+        "margins": modes,
+        "buckling": {"N_cr": res["N_cr"] * units.FROM_SI[si.unit_system]["A"],
+                     "mode": {"m": res["mode_m"], "n": res["mode_n"]},
+                     "load_ratio_Ny_over_Nx": ratio,
+                     "boundary": "simply_supported"},
+        "definition": ("같은 배수 척도로 정렬한다 — strength = Tsai-Wu R, "
+                       "buckling = N_cr/|Nx|. 최솟값이 지배 모드다"),
+    }
+    if r_strength is not None and r_buckling < r_strength:
+        warnings.append(item("W130", field="governing_mode",
+                             detail=f"**좌굴이 지배한다** — 강도 여유 {r_strength:.3g} 배 vs 좌굴 여유 "
+                                    f"{r_buckling:.3g} 배 ({r_strength / max(r_buckling, 1e-300):.0f}배 차이). "
+                                    f"강도 판정만 보고하면 안 된다"))
+    warnings.append(item("W130", field="governing_mode.buckling",
+                         detail="좌굴 여유는 4변 단순지지 기준이다 — 실제 경계가 고정단에 가까우면 "
+                                "compute_buckling(boundary='clamped') 로 상계도 함께 볼 것"))
+    return gov
+
+
 def run_free_edge_delamination(payload, loads=None, fracture=None,
                                include_debug: bool = False) -> dict:
     """자유 가장자리 박리 — O'Brien ERR + 계면별 구동력 (assess_free_edge_delamination, §19.1)."""
@@ -2233,3 +2410,216 @@ def run_free_edge_delamination(payload, loads=None, fracture=None,
     return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
                      unit_system=si.unit_system, assumptions_extra=extra,
                      include_debug=include_debug, t0=t0)
+
+
+def _num_ok(v, positive=True):
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v) and (v > 0 if positive else True))
+
+
+def run_micromechanics(fiber, matrix, fiber_volume_fraction, model: str = "halpin_tsai",
+                       xi_E2: float | None = None, xi_G12: float | None = None,
+                       include_debug: bool = False) -> dict:
+    """구성재 → lamina 직교이방 물성 (derive_lamina_from_constituents, §19.3).
+
+    단위계 무관 — 출력 단위는 입력과 동일하다 (homogenize_layer 와 같은 관례).
+    """
+    from app.solver import micromechanics as MM
+    t0 = time.perf_counter()
+    hash_payload = {"fiber": fiber, "matrix": matrix, "Vf": fiber_volume_fraction,
+                    "model": model, "xi_E2": xi_E2, "xi_G12": xi_G12}
+    err = None
+    f_req = ("E1", "E2", "G12", "nu12")
+    if not (isinstance(fiber, dict) and all(_num_ok(fiber.get(k)) for k in f_req)):
+        err = item("E100", field="fiber",
+                   detail="fiber는 {E1>0, E2>0, G12>0, nu12} (횡등방 섬유)여야 합니다. "
+                          "선택: alpha1, alpha2, rho")
+    elif not (_num_ok(fiber.get("nu12"), positive=False) and -1.0 < fiber["nu12"] < 0.5):
+        err = item("E100", field="fiber.nu12", detail="fiber.nu12는 (-1, 0.5) 범위여야 합니다")
+    elif not (isinstance(matrix, dict) and _num_ok(matrix.get("E"))
+              and _num_ok(matrix.get("nu"), positive=False) and -1.0 < matrix["nu"] < 0.5):
+        err = item("E100", field="matrix",
+                   detail="matrix는 {E>0, nu∈(-1,0.5)} (등방 수지)여야 합니다. 선택: alpha, rho")
+    elif not (_num_ok(fiber_volume_fraction) and 0.0 < fiber_volume_fraction <= 1.0):
+        err = item("E100", field="fiber_volume_fraction",
+                   detail="fiber_volume_fraction은 (0, 1] 범위여야 합니다")
+    elif model not in ("halpin_tsai", "chamis"):
+        err = item("E100", field="model",
+                   detail="model은 'halpin_tsai' 또는 'chamis' 여야 합니다")
+    elif any(x is not None and not _num_ok(x) for x in (xi_E2, xi_G12)):
+        err = item("E100", field="xi", detail="xi_E2 / xi_G12 는 양수여야 합니다")
+    if err is not None:
+        return ENV.build(data=None, errors=[err], warnings=[], payload=hash_payload,
+                         include_debug=include_debug, t0=t0)
+
+    v_f = float(fiber_volume_fraction)
+    res = MM.lamina_from_constituents(
+        fiber, matrix, v_f, model=model,
+        xi_e2=MM.XI_E2_DEFAULT if xi_E2 is None else float(xi_E2),
+        xi_g12=MM.XI_G12_DEFAULT if xi_G12 is None else float(xi_G12))
+
+    mat: dict = {"type": "orthotropic_2d", "E1": res["E1"], "E2": res["E2"],
+                 "G12": res["G12"], "nu12": res["nu12"],
+                 "source": {"type": "estimated",
+                            "ref": f"micromechanics/{model} Vf={v_f:g}"}}
+    for k in ("alpha1", "alpha2", "rho"):
+        if k in res:
+            mat[k] = res[k]
+
+    warn = [item("W120", field="material.E2/G12",
+                 detail="E2·G12는 **기지 지배**라 미시역학 추정의 불확실성이 크다(경계 참조). "
+                        "실측이 있으면 materialtwin 에서 가져와 쓰고, 없으면 Halpin–Tsai의 "
+                        "ξ를 실측으로 역보정할 것. E1·ν12는 섬유 지배라 ROM이 신뢰도가 높다")]
+    if v_f > 0.7:
+        warn.append(item("W130", field="fiber_volume_fraction",
+                         detail=f"Vf = {v_f:g} — 실제 공정에서 도달하기 어려운 값이다(원형 섬유 "
+                                f"정사각 배열 이론 한계 0.785). 물성이 낙관적으로 나온다"))
+    for key in ("E2", "G12"):
+        lo = res["bounds"][key]["reuss"]
+        hi = res["bounds"][key]["voigt"]
+        if not (lo * (1 - 1e-9) <= res[key] <= hi * (1 + 1e-9)):
+            warn.append(item("W130", field=f"material.{key}",
+                             detail=f"{key} 추정값이 Reuss–Voigt 경계를 벗어났다 — 입력을 확인할 것"))
+
+    data = {
+        "material": mat,
+        "bounds": res["bounds"],
+        "model": model,
+        "fiber_volume_fraction": v_f,
+        "xi": {"E2": MM.XI_E2_DEFAULT if xi_E2 is None else float(xi_E2),
+               "G12": MM.XI_G12_DEFAULT if xi_G12 is None else float(xi_G12)},
+        "definition": ("E1·ν12·ρ = 혼합법칙(ROM), E2·G12 = Halpin–Tsai(ξ) 또는 Chamis, "
+                       "α = Schapery. Halpin–Tsai는 ξ→0에서 Reuss(하한), ξ→∞에서 Voigt(상한)로 "
+                       "정확히 수렴하므로 bounds가 추정의 폭이다"),
+        "usage": "material을 그대로 laminae[].material 에 넣어 쓸 수 있다",
+    }
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
+                         payload=hash_payload, include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     assumptions_extra=[
+                         "횡등방 섬유 + 등방 수지, 완전 접착(계면 미끄러짐 없음), 공극 0 가정",
+                         "단위계 무관 — 출력 단위는 입력과 동일",
+                     ], include_debug=include_debug, t0=t0)
+
+
+def run_moisture_uptake(payload, diffusion, time_s=None, mode: str = "absorption",
+                        include_debug: bool = False) -> dict:
+    """Fickian 수분 확산 동역학 (compute_moisture_uptake, §19.4)."""
+    from app.solver import diffusion as DF
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+
+    err = None
+    if not isinstance(diffusion, dict):
+        err = item("E100", field="diffusion",
+                   detail="diffusion은 {\"D\": 확산계수(길이²/s), \"M_inf\": 포화 수분율[%M]} "
+                          "또는 {\"D0\", \"Ed\", \"temperature_K\", \"M_inf\"} 여야 합니다")
+    elif mode not in ("absorption", "desorption"):
+        err = item("E100", field="mode",
+                   detail="mode는 'absorption'(흡습) 또는 'desorption'(베이크/탈습) 이어야 합니다")
+    if err is None:
+        has_direct = _num_ok(diffusion.get("D"))
+        has_arr = all(_num_ok(diffusion.get(k)) for k in ("D0", "Ed", "temperature_K"))
+        if not (has_direct or has_arr):
+            err = item("E100", field="diffusion.D",
+                       detail="D(>0) 또는 Arrhenius 3종(D0>0, Ed>0, temperature_K>0)이 필요합니다")
+        elif not _num_ok(diffusion.get("M_inf")):
+            err = item("E100", field="diffusion.M_inf",
+                       detail="M_inf(포화 수분율 [%M], >0)가 필요합니다")
+        elif time_s is not None and not (_num_ok(time_s, positive=False) and time_s >= 0):
+            err = item("E100", field="time_s", detail="time_s는 0 이상의 유한한 숫자(초)여야 합니다")
+    if err is not None:
+        return ENV.build(data=None, errors=[err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    f_d = units.TO_SI[si.unit_system]["diffusivity"]
+    if _num_ok(diffusion.get("D")):
+        d_si = float(diffusion["D"]) * f_d
+        d_note = "직접 입력"
+    else:
+        d_si = DF.arrhenius_diffusivity(float(diffusion["D0"]) * f_d, float(diffusion["Ed"]),
+                                        float(diffusion["temperature_K"]))
+        d_note = (f"Arrhenius D = D0·exp(−Ed/RT), T = {diffusion['temperature_K']} K")
+    m_inf = float(diffusion["M_inf"])
+    h = si.total_thickness
+    if d_si <= 0.0:
+        return ENV.build(data=None, errors=[item("E100", field="diffusion",
+                                                 detail="확산계수가 0 이하입니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    f = units.FROM_SI[si.unit_system]
+    char = {}
+    for frac, label in ((0.5, "t50"), (0.9, "t90"), (0.99, "t99")):
+        tau = DF.tau_for_fraction(frac)
+        secs = None if tau is None else tau * h * h / d_si
+        char[label] = None if secs is None else {"seconds": secs, "hours": secs / 3600.0,
+                                                 "days": secs / 86400.0}
+
+    data: dict = {
+        "thickness": h * f["z"],
+        "diffusivity_SI_m2_per_s": d_si,
+        "diffusivity_source": d_note,
+        "M_inf": m_inf,
+        "mode": mode,
+        "characteristic_times": char,
+        "definition": ("양면 노출 1D Fick 해석해(Shen–Springer). 무차원 시간 τ = D·t/h² 하나가 "
+                       "전부를 지배한다 — **두께가 2배면 시간이 4배**다. "
+                       "M/M∞ = 1 − (8/π²)Σ exp(−(2n+1)²π²τ)/(2n+1)²"),
+    }
+    if time_s is not None:
+        tau = d_si * float(time_s) / (h * h)
+        frac = DF.uptake_fraction(tau)
+        if mode == "desorption":
+            remaining = 1.0 - frac
+            m_now = m_inf * remaining
+            data["state"] = {"time_s": float(time_s), "tau": tau,
+                             "remaining_fraction": remaining, "moisture_content": m_now,
+                             "note": "mode=desorption — M_inf 를 초기 수분율로 보고 남은 양을 준다"}
+        else:
+            m_now = m_inf * frac
+            data["state"] = {"time_s": float(time_s), "tau": tau,
+                             "uptake_fraction": frac, "moisture_content": m_now}
+        data["state"]["delta_C_for_thermal_tool"] = (
+            m_now if mode == "absorption" else m_now - m_inf)
+        data["state"]["chain"] = ("이 delta_C 를 compute_thermal_response(laminate, delta_C=...) 에 "
+                                  "넣으면 흡습 변형·곡률·판 휨까지 이어진다")
+        data["profile"] = [
+            {"zeta": zz, "c_over_cinf": DF.concentration_profile(tau, zz)}
+            for zz in (0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0)]
+        data["profile_note"] = ("ζ=(z+h/2)/h, 0·1 이 노출면. 두께 중앙(ζ=0.5)이 가장 늦게 젖는다 — "
+                                "표면과 중앙의 차이가 클수록 흡습 구배로 인한 휨이 생긴다")
+
+    warn = list(warnings)
+    warn.append(item("W130", field="model",
+                     detail="Fickian(단순 확산) 가정 — 실제 에폭시는 2단계 흡습·비Fickian 거동을 "
+                            "보일 수 있고, D 는 온도·수분율에 의존한다. 장시간 외삽은 신중할 것"))
+    warn.append(item("W120", field="diffusion.D",
+                     detail="D·M_inf 는 재료·환경(온습도) 실측값이어야 한다. 문헌 대표값을 쓰면 "
+                            "특성시간이 자릿수로 달라질 수 있다 — materialtwin 에서 실측을 확인할 것"))
+    if len({(p_.name or "", p_.E1) for p_ in si.plies}) > 1:
+        warn.append(item("W130", field="laminae",
+                         detail="이종 재료 적층인데 단일 D·M_inf 를 쓰고 있다 — 층별 확산계수가 "
+                                "다르면 실제 거동은 이 해와 다르다(등가 단일층 근사)"))
+    if time_s is not None and data["state"]["tau"] > 5.0:
+        warn.append(item("W130", field="time_s",
+                         detail=f"τ = {data['state']['tau']:.3g} — 사실상 완전 포화/건조 상태다. "
+                                f"특성시간(characteristic_times)으로 판단하는 것이 낫다"))
+
+    hash_payload = {"laminate": payload, "diffusion": diffusion, "time_s": time_s, "mode": mode}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
+                         payload=hash_payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     unit_system=si.unit_system,
+                     assumptions_extra=[
+                         "양면 노출·1D 두께방향 확산, D 상수, 초기 균일 분포 가정",
+                         "τ = D·t/h² 가 유일한 지배 변수 — 두께 제곱에 비례해 시간이 늘어난다",
+                         *_source_assumptions(si),
+                     ], include_debug=include_debug, t0=t0)

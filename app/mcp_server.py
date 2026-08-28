@@ -488,6 +488,41 @@ def solve_prescribed_curvature(laminate: dict, kappa: list | None = None,
 
 
 @mcp.tool()
+def compute_failure_envelope(laminate: dict, plane: str = "Nx-Ny",
+                             magnitude: float | None = None,
+                             delta_T: float | None = None) -> dict:
+    """하중 **방향**에 대한 파손 포락선 — 어느 방향이 가장 약한지 결정론적으로 준다.
+
+    지금까지 최소점을 찾는 유일한 방법이 비결정론적 반복 호출이었다. 고정 **72방향**
+    격자(5도 간격)에서 방향당 Tsai-Wu 강도비를 한 번씩 계산한다.
+    plane: "Nx-Ny"(기본) | "Nx-Nxy" | "Mx-My". delta_T 를 주면 열잔류를 포함해
+    R 을 2차식으로 푼다(§19.10 — 잔류는 하중 배수와 함께 커지지 않는다).
+    반환: 방향별 failure_load·임계 ply·지배 모드, **weakest**(가장 약한 방향),
+    strongest, anisotropy_ratio(최강/최약 비 — 방향 민감도).
+    first-ply-failure 기준이다. 한계하중은 run_progressive_failure 로.
+    """
+    return _guarded(PIPE.run_failure_envelope, laminate, plane=plane, magnitude=magnitude,
+                    delta_t=delta_T)
+
+
+@mcp.tool()
+def solve_required_thickness_scale(laminate: dict, panel: dict, applied_Nx: float,
+                                   target_margin: float = 1.0, load_ratio: float = 0.0,
+                                   boundary: str = "simply_supported") -> dict:
+    """목표 좌굴 여유를 만족하는 **최소 두께 배율**을 폐형해로 역산한다.
+
+    전 ply 를 균일 배율 s 로 키우면 D ∝ s³ 이므로 **N_cr ∝ s³** 이다(실측 전 자리 일치).
+    따라서 s = (target/current)^(1/3) 가 닫힌 형태로 나온다 — 에이전트가 compute_buckling 을
+    이분법으로 5~10회 부르던 것을 1회로 바꾼다.
+    applied_Nx(압축 크기), target_margin(목표 N_cr/N, 기본 1.0), boundary 는 compute_buckling 과 동일.
+    반환: required_scale, 배율 적용 후 총두께·ply 두께, N_cr 전후.
+    **균일 배율만 유효하다** — 일부 ply 만 두껍게 하거나 적층 순서를 바꾸면 지수 법칙이 깨진다(W130).
+    """
+    return _guarded(PIPE.run_required_scale, laminate, panel=panel, applied_Nx=applied_Nx,
+                    target_margin=target_margin, load_ratio=load_ratio, boundary=boundary)
+
+
+@mcp.tool()
 def get_reference_cases(case_id: str | None = None) -> dict:
     """내장 기준 케이스를 반환한다. case_id 생략 시 목록.
 

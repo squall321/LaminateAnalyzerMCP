@@ -948,6 +948,7 @@ def run_ply_stresses(payload, loads=None, delta_t=None, detail: str = "auto",
                                                  detail="detail은 auto|full|summary 중 하나여야 합니다")],
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
+    plies_full = list(plies_out)     # 절단 전 전체 — 항복 게이트는 전 ply 를 봐야 한다
     truncated_note = None
     if detail != "full" and (detail == "summary" or len(plies_out) > config.SUMMARY_PLY_LIMIT):
         # 임계도 순 상위 N만 (무단 절단 금지 — note로 명시, detail="full"로 전체 조회 가능)
@@ -978,6 +979,34 @@ def run_ply_stresses(payload, loads=None, delta_t=None, detail: str = "auto",
     if no_strength:
         data["note"] = f"laminae{no_strength}는 strength 미입력 — 응력만 복원(파손 판정 제외). " \
                        f"강도는 material.strength {{Xt,Xc,Yt,Yc,S}}로 입력"
+
+    # §19.15 항복 게이트 — 서버 전체가 완전탄성이라 소성이 들어가면 조용히 틀린다.
+    # 소성 솔버를 짓기 전에 "탄성 가정이 깨졌다"만 말해도 이 문제 가치의 대부분이다.
+    yielded = []
+    for row in plies_full:
+        p_ = si.plies[row["ply"]]
+        if p_.sigma_y is None:
+            continue
+        peak = max(abs(FAIL.von_mises_plane_stress(np.asarray(v["sigma_xyz"]) / f["modulus"]))
+                   for v in (row["stresses"]["bottom"], row["stresses"]["mid"],
+                             row["stresses"]["top"]))
+        if peak >= p_.sigma_y:
+            yielded.append({"ply": row["ply"], "von_mises": peak * f["modulus"],
+                            "sigma_y": p_.sigma_y * f["modulus"],
+                            "ratio": peak / p_.sigma_y})
+    if yielded:
+        data["yielding"] = {
+            "plies": yielded,
+            "definition": "평면응력 von Mises √(σx²−σxσy+σy²+3τxy²) 의 ply 내 3점 최대값 대비 σ_y",
+        }
+        worst = max(yielded, key=lambda r: r["ratio"])
+        warnings.append(item("W130", field="yielding",
+                             detail=f"laminae[{worst['ply']}] 의 von Mises 가 항복강도의 "
+                                    f"{worst['ratio']:.3g}배다 — **완전탄성 가정이 깨졌다**. "
+                                    f"이 서버는 소성을 모델링하지 않으므로 응력·곡률·잔류가 모두 "
+                                    f"과대평가된다. 제하 후 잔류 곡률도 실제로는 0이 아니다"))
+    elif any(p_.sigma_y is not None for p_ in si.plies):
+        data["yielding"] = {"plies": [], "note": "항복강도가 주어진 ply 는 모두 탄성 범위 안이다"}
 
     # §19.6 지배모드 게이트 — 압축이면 좌굴이 먼저 올 수 있다(실측 최대 410배 모순)
     gov = _stability_gate(si, N_si, panel, warnings,
@@ -3084,3 +3113,228 @@ def run_prescribed_curvature(payload, kappa=None, bend_radius=None, bend_axis: s
                          "자유 폭(M_y=0)과 구속 폭(κ_y=0)은 다른 문제다 — width 로 명시한다",
                          *_source_assumptions(si),
                      ], include_debug=include_debug, t0=t0)
+
+
+# ── §19.16 파손 포락선 / §19.17 필요 두께 배율 ─────────────────────────────
+
+ENVELOPE_DIRECTIONS = 72     # 고정 방향 격자 (5도 간격) — 결정론
+
+
+def run_failure_envelope(payload, plane: str = "Nx-Ny", magnitude=None,
+                         delta_t=None, include_debug: bool = False) -> dict:
+    """하중 **방향** 축의 파손 포락선 (compute_failure_envelope, §19.16).
+
+    지금까지 최소점을 찾는 유일한 방법이 비결정론적 반복 호출이었다. 고정 72방향
+    격자에서 방향당 Tsai-Wu 강도비를 한 번씩 계산해 포락선과 최약 방향을 결정론적으로 준다.
+    """
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    planes = {"Nx-Ny": (0, 1, "N"), "Nx-Nxy": (0, 2, "N"), "Mx-My": (0, 1, "M")}
+    if plane not in planes:
+        return ENV.build(data=None, errors=[item("E100", field="plane",
+                                                 detail=f"plane은 {list(planes)} 중 하나여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    if magnitude is not None and not _num_ok(magnitude):
+        return ENV.build(data=None, errors=[item("E100", field="magnitude",
+                                                 detail="magnitude는 유한한 양수여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    with_strength = [k for k, p_ in enumerate(si.plies) if p_.strength is not None]
+    if not with_strength:
+        return ENV.build(data=None, errors=[item("E100", field="laminae",
+                                                 detail="strength가 있는 ply가 없습니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    i, j, kind = planes[plane]
+    mag_disp = float(magnitude) if magnitude is not None else 1.0
+    fac = units.TO_SI[si.unit_system]["load_n" if kind == "N" else "load_m"]
+    mag_si = mag_disp * fac
+    A, B, D, z, h = _abd_of_plies(si.plies)
+    qbars = [MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
+             for p_ in si.plies]
+
+    from app.solver import failure as FAIL
+    from app.solver import thermal as TH
+    dT = float(delta_t) if _num_ok(delta_t, positive=False) else 0.0
+    res_state = None
+    if dT != 0.0:
+        missing = [k for k, p_ in enumerate(si.plies) if not p_.has_cte]
+        if missing:
+            return ENV.build(data=None, errors=[item("E203", field="laminae",
+                                                     detail=f"laminae{missing} 에 CTE가 없습니다")],
+                             warnings=warnings, payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+        eps_free = [TH.alpha_vector(p_.alpha1, p_.alpha2, p_.angle_deg) * dT for p_ in si.plies]
+        n_th, m_th = TH.free_strain_loads(qbars, eps_free, z)
+        e_r, k_r = RESP.solve_response(A, B, D, n_th, m_th)
+        res_state = (e_r, k_r, eps_free)
+
+    points = []
+    for d in range(ENVELOPE_DIRECTIONS):
+        theta = 2.0 * math.pi * d / ENVELOPE_DIRECTIONS
+        vec = np.zeros(3)
+        vec[i], vec[j] = math.cos(theta) * mag_si, math.sin(theta) * mag_si
+        n_v = vec if kind == "N" else np.zeros(3)
+        m_v = vec if kind == "M" else np.zeros(3)
+        try:
+            eps0, kappa = RESP.solve_response(A, B, D, n_v, m_v)
+        except RESP.SingularSystemError:
+            return ENV.build(data=None, errors=[item("E400", field="laminate")], warnings=warnings,
+                             payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+        worst_r, worst_k, worst_mode = None, None, None
+        for k in with_strength:
+            p_ = si.plies[k]
+            Xt, Xc, Yt, Yc, S = p_.strength
+            for zv in (float(z[k]), 0.5 * (z[k] + z[k + 1]), float(z[k + 1])):
+                s_m = FAIL.stress_to_material_axes(
+                    FAIL.ply_stresses_at(qbars[k], eps0, kappa, zv), p_.angle_deg)
+                if res_state is None:
+                    s_r = np.zeros(3)
+                else:
+                    e_r, k_r, eps_free = res_state
+                    s_r = FAIL.stress_to_material_axes(
+                        qbars[k] @ (e_r + zv * k_r - eps_free[k]), p_.angle_deg)
+                r = FAIL.tsai_wu_with_offset(s_m, s_r, Xt, Xc, Yt, Yc, S).get("strength_ratio")
+                if r is None or r < 0:
+                    continue
+                if worst_r is None or r < worst_r:
+                    worst_r, worst_k = r, k
+                    worst_mode = FAIL.max_stress(r * s_m + s_r, Xt, Xc, Yt, Yc, S)["mode"]
+        if worst_r is None:
+            continue
+        points.append({"angle_deg": math.degrees(theta),
+                       "direction": [float(vec[i] / mag_si), float(vec[j] / mag_si)],
+                       "strength_ratio": float(worst_r),
+                       "failure_load": [float(worst_r * vec[i] / fac),
+                                        float(worst_r * vec[j] / fac)],
+                       "critical_ply": worst_k, "mode": worst_mode})
+    if not points:
+        return ENV.build(data=None, errors=[item("E100", field="laminate",
+                                                 detail="어느 방향에서도 파손면에 도달하지 못했습니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    weakest = min(points, key=lambda r: (r["strength_ratio"], r["angle_deg"]))
+    strongest = max(points, key=lambda r: (r["strength_ratio"], -r["angle_deg"]))
+    axes = plane.split("-")
+    data = {
+        "plane": plane, "axes": axes, "n_directions": ENVELOPE_DIRECTIONS,
+        "probe_magnitude": mag_disp,
+        "points": points,
+        "weakest": {"angle_deg": weakest["angle_deg"], "failure_load": weakest["failure_load"],
+                    "critical_ply": weakest["critical_ply"], "mode": weakest["mode"]},
+        "strongest": {"angle_deg": strongest["angle_deg"],
+                      "failure_load": strongest["failure_load"]},
+        "anisotropy_ratio": strongest["strength_ratio"] / weakest["strength_ratio"],
+        "delta_T": dT if dT != 0.0 else None,
+        "definition": (f"{ENVELOPE_DIRECTIONS}방향 고정 격자(5도 간격). 방향마다 단위 하중을 걸고 "
+                       f"Tsai-Wu 강도비 R 을 구해 failure_load = R×방향벡터 로 포락선을 만든다. "
+                       f"열잔류가 있으면 R 은 2차식으로 푼다(§19.10)"),
+    }
+    warn = list(warnings)
+    warn.append(item("W130", field="points",
+                     detail=f"{ENVELOPE_DIRECTIONS}방향 격자라 각도 해상도가 5도다 — 뾰족한 "
+                            f"포락선의 꼭짓점은 놓칠 수 있다"))
+    if dT == 0.0 and any(p_.has_cte for p_ in si.plies):
+        warn.append(item("W130", field="delta_T",
+                         detail="CTE 가 있는데 delta_T 가 없다 — 경화 잔류가 빠진 포락선이다"))
+    hash_payload = {"laminate": payload, "plane": plane, "magnitude": magnitude,
+                    "delta_T": delta_t}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
+                         payload=hash_payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     unit_system=si.unit_system,
+                     assumptions_extra=["포락선은 Tsai-Wu 기준 first-ply-failure 다 — 진행성 파손 "
+                                        "이후의 한계하중은 run_progressive_failure 로",
+                                        *_source_assumptions(si)],
+                     include_debug=include_debug, t0=t0)
+
+
+def run_required_scale(payload, panel, applied_Nx, target_margin: float = 1.0,
+                       load_ratio: float = 0.0, boundary: str = "simply_supported",
+                       include_debug: bool = False) -> dict:
+    """목표 좌굴 여유를 만족하는 최소 두께 배율 (solve_required_thickness_scale, §19.17).
+
+    전 ply 두께를 s 배 하면 A ∝ s, D ∝ s³ 이므로 **N_cr ∝ s³** 이다(실측 전 자리 일치).
+    따라서 s = (target·N/N_cr(1))^(1/3) 가 폐형해다 — 에이전트 이분법 5~10회를 1회로 바꾼다.
+    """
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    a, b = _panel_to_si(panel, si.unit_system) if panel is not None else (None, None)
+    err = None
+    if a is None:
+        err = item("E100", field="panel", detail="panel {\"Lx\": >0, \"Ly\": >0} 은 필수입니다")
+    elif not _num_ok(applied_Nx):
+        err = item("E100", field="applied_Nx", detail="applied_Nx는 압축 크기(양수)여야 합니다")
+    elif not _num_ok(target_margin):
+        err = item("E100", field="target_margin", detail="target_margin은 양수여야 합니다")
+    elif not (_num_ok(load_ratio, positive=False)):
+        err = item("E100", field="load_ratio", detail="load_ratio는 유한한 숫자여야 합니다")
+    else:
+        from app.solver import plate_navier as _NAV
+        if _NAV.normalize_boundary(boundary) is None:
+            err = item("E100", field="boundary",
+                       detail=f"boundary 코드가 유효하지 않습니다. {_NAV.FREE_EDGE_NOTE}")
+    if err is not None:
+        return ENV.build(data=None, errors=[err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    from app.solver import plate_navier as NAV
+    D_use, appl, h, _ = _bending_stiffness_for_navier(si, warnings)
+    bp = NAV.normalize_boundary(boundary)
+    if bp == ("SS", "SS"):
+        res = NAV.buckling_ncr(D_use, a, b, float(load_ratio))
+    else:
+        res = NAV.scan_ritz_buckling(D_use, a, b, float(load_ratio), boundary,
+                                     NAV.CLAMPED_MODE_LIMIT)
+    if res["N_cr"] is None:
+        return ENV.build(data=None, errors=[item("E100", field="load_ratio",
+                                                 detail=res.get("reason", "압축 지배 모드 없음"))],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    n_si = float(applied_Nx) * units.TO_SI[si.unit_system]["load_n"]
+    current = res["N_cr"] / n_si
+    scale = (float(target_margin) / current) ** (1.0 / 3.0)
+    f = units.FROM_SI[si.unit_system]
+    data = {
+        "current_margin": current,
+        "target_margin": float(target_margin),
+        "required_scale": scale,
+        "required_total_thickness": h * scale * f["z"],
+        "current_total_thickness": h * f["z"],
+        "scaled_ply_thicknesses": [p_.thickness * scale * f["z"] for p_ in si.plies][:config.SUMMARY_TOP_N],
+        "N_cr_current": res["N_cr"] * f["A"],
+        "N_cr_scaled": res["N_cr"] * scale ** 3 * f["A"],
+        "boundary": boundary,
+        "mode": {"m": res["mode_m"], "n": res["mode_n"]},
+        "definition": ("전 ply 를 균일 배율 s 로 키우면 D ∝ s³ 이므로 N_cr ∝ s³ 이다(정확). "
+                       "s = (target/current)^(1/3) 폐형해 — 반복 탐색이 필요 없다"),
+    }
+    warn = list(warnings)
+    warn.append(item("W130", field="required_scale",
+                     detail="**균일 배율만** 유효하다 — 일부 ply 만 두껍게 하거나 적층 순서를 바꾸면 "
+                            "이 지수 법칙이 깨진다. 그때는 compute_buckling 으로 직접 확인할 것"))
+    if scale > 3.0:
+        warn.append(item("W130", field="required_scale",
+                         detail=f"필요 배율 {scale:.3g} 가 크다 — 두께로만 풀지 말고 적층 순서·"
+                                f"경계조건·판 크기를 함께 검토할 것"))
+    hash_payload = {"laminate": payload, "panel": panel, "applied_Nx": applied_Nx,
+                    "target_margin": target_margin, "load_ratio": load_ratio,
+                    "boundary": boundary}
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     unit_system=si.unit_system,
+                     assumptions_extra=["균일 두께 배율 가정 — 물성·적층각·판 크기는 그대로",
+                                        *_source_assumptions(si)],
+                     include_debug=include_debug, t0=t0)

@@ -39,6 +39,7 @@ class SiPly:
     loss_factor: float | None = None
     fatigue: tuple | None = None   # (model_type, param) — S-N (§17.7 선택)
     s6666: float | None = None     # 1/Pa^3 — 면내 전단 비선형 (§18.7 선택)
+    sigma_y: float | None = None   # Pa — 항복강도 (§19.15 선택, 등방 전용)
 
     @property
     def has_cte(self) -> bool:
@@ -252,6 +253,8 @@ def validate_and_convert(payload) -> tuple[SiLaminate | None, list[dict], list[d
                            g13=g13_si, g23=g23_si, g_transverse_assumed=g_assumed,
                            ilss=(m.ilss * f["modulus"] if m.ilss is not None else None),
                            loss_factor=m.loss_factor, fatigue=fat_si,
+                           sigma_y=(getattr(m, "sigma_y", None) * f["modulus"]
+                                    if getattr(m, "sigma_y", None) is not None else None),
                            s6666=(m.shear_nonlinear.S6666 * f["shear_nl"]
                                   if getattr(m, "shear_nonlinear", None) is not None else None)))
         fingerprint.append((lam.thickness, angle_norm, E1, E2, G12, nu12, rho_si, a1, a2))

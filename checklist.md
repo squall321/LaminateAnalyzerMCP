@@ -77,6 +77,12 @@
       놓쳐 6.4배 비보수라 E100 거부. 상계 오차 CCCC +6.6% / SSCC +11.6% 를 W130 에 명시
 - [x] ~~변위 제어(곡률 지정)~~ — v0.15.0 solve_prescribed_curvature. 자유도 분할 풀이로
       대칭→D·κ, 비대칭→D*·κ 정확 환원. 자유/구속 폭 9.6% 차이. 지름길 M=D·κ 는 +244.8% 과대
+- [x] ~~항복·선형성 게이트~~ — v0.16.0 sigma_y + von Mises. PCB Cu 층에서 2.19배 항복 실측
+- [x] ~~파손 포락선~~ — v0.16.0 compute_failure_envelope (고정 72방향, 열잔류 포함).
+      failure_load 를 되걸면 R=1 검산
+- [x] ~~필요 두께 배율~~ — v0.16.0 solve_required_thickness_scale. N_cr ∝ s³ 전 자리 일치,
+      목표 4종에 대해 실제 여유 rel 1e-9 검산
+- [ ] (유보) 전단 좌굴 Nxy — 1항 Ritz 로는 정직하게 못 푼다. 다항 Ritz 커널 이후
 - [ ] (보류) 채널링 g(α,β) 보정표 — 수기 이식 리스크로 미탑재 유지 (계획서 §17.7.3)
 - [x] ~~기하 비선형 (V3)~~ — v0.8.0: compute_bistable_shapes(Hyer 쌍안정·임계 판 크기)
       + compute_large_deflection(von Karman, movable/immovable) + compute_postbuckling

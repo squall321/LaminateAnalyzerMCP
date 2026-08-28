@@ -130,3 +130,9 @@ def tsai_wu_with_offset(sigma_mech: np.ndarray, sigma_res: np.ndarray,
     R = (-b + math.sqrt(b * b + 4.0 * a * rem)) / (2.0 * a)
     return {"criterion": "tsai_wu", "strength_ratio": R,
             "failure_index": 1.0 / R if R > 0 else None}
+
+
+def von_mises_plane_stress(sigma_xyz: np.ndarray) -> float:
+    """평면응력 von Mises 등가응력 √(σx² − σxσy + σy² + 3τxy²) (계획서 §19.15)."""
+    sx, sy, txy = float(sigma_xyz[0]), float(sigma_xyz[1]), float(sigma_xyz[2])
+    return math.sqrt(max(0.0, sx * sx - sx * sy + sy * sy + 3.0 * txy * txy))

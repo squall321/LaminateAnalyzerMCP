@@ -1,7 +1,7 @@
 schema_version: 2
 id: laminate_analyzer_mcp
 name: Laminate Analyzer MCP
-version: 0.15.0
+version: 0.16.0
 owner: cae-automation
 status: beta
 app_type: web_app
@@ -16,7 +16,7 @@ description: |
     같은 계산·검증·envelope를 쓰므로 MCP 클라이언트 없는 소비자도 동일 결과를 얻는다.
     에이전트 등록 예) claude mcp add --transport http laminate-analyzer <포털베이스>/apps/laminate_analyzer_mcp/mcp
   - 헬스체크: /health (rest_base·mcp_endpoint 안내 포함). 웹 UI 없음.
-  - Tool 31종: analyze_laminate(원샷 진입점), validate_laminate_input, compute_abd_matrix,
+  - Tool 32종: analyze_laminate(원샷 진입점), validate_laminate_input, compute_abd_matrix,
     compute_neutral_axis, evaluate_laminate, get_reference_cases(폐형해 자가검증), get_server_info,
     solve_load_response(하중응답·유효상수), run_sensitivity_analysis, batch_evaluate_laminates,
     generate_design_report(ko/en), recover_ply_stresses(층별 응력·Tsai-Wu 파손·FPF), compute_thermal_response(유효 CTE·열/흡습 곡률·PCB 휨),
@@ -29,7 +29,9 @@ description: |
     derive_lamina_from_constituents(섬유+수지 → lamina 직교이방 물성, Reuss–Voigt 경계 동반),
     compute_moisture_uptake(Fickian 확산 — 흡습/베이크 시간, 두께방향 분포),
     assess_partial_composite_bending(순응층 부분합성 — CLT 굽힘강성 과대평가 배수),
-    solve_prescribed_curvature(변위 제어 — 곡률·굽힘반경 지정, 자유/구속 폭 구분).
+    solve_prescribed_curvature(변위 제어 — 곡률·굽힘반경 지정, 자유/구속 폭 구분),
+    compute_failure_envelope(하중 방향 72방향 파손 포락선 — 최약 방향·방향 민감도),
+    solve_required_thickness_scale(목표 좌굴 여유의 최소 두께 배율 폐형해 역산).
   - 지배 파손모드 게이트: 압축 하중에 panel 을 주면 강도·좌굴 여유를 같은 척도로 정렬해
     governing_mode 를 알려준다(실측 410배 모순 봉쇄). 열해석은 N^T 를 노출하고 면내 구속 시
     좌굴 여유·ΔT_cr 을 함께 낸다. compute_buckling·compute_natural_frequencies 는

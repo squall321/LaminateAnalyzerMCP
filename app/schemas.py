@@ -67,6 +67,8 @@ class IsotropicMaterial(BaseModel):
     viscoelastic: Viscoelastic | None = None
     strength: Strength | None = None
     fatigue: FatigueSN | None = None
+    sigma_y: float | None = Field(default=None, gt=0,
+        description="항복강도 (선택, 응력 단위) — 금속 박막·솔더. 주면 von Mises 로 탄성 가정 이탈을 판정")
     name: str | None = Field(default=None, description="재료 라벨 (추적용)")
     source: SourceInfo | None = None
 

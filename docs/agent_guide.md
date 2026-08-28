@@ -354,3 +354,19 @@ y변 단순-단순). SS/CC/CS 조합 9종. `"simply_supported"`·`"clamped"` 별
   계산하지 말 것.
 - `naive_D_kappa.overprediction_Mx` 가 지름길의 오차 배수다. 1에서 멀면 W130 이 뜬다.
 
+## 19. 방향·목표 축 도구 (v0.16.0)
+
+**`compute_failure_envelope(laminate, plane, magnitude?, delta_T?)`** — 하중 **방향**에 대한
+포락선을 고정 72방향으로 준다. 지금까지 최약 방향을 찾으려면 비결정론적 반복 호출뿐이었다.
+`weakest`(가장 약한 방향·임계 ply·모드)와 `anisotropy_ratio`(최강/최약 비)가 헤드라인이다.
+`failure_load` 를 그대로 걸면 R=1 이 나온다(검산됨). 5도 해상도라 뾰족한 꼭짓점은 놓칠 수 있다.
+
+**`solve_required_thickness_scale(laminate, panel, applied_Nx, target_margin)`** —
+목표 좌굴 여유의 **최소 두께 배율**을 폐형해로 역산한다. N_cr ∝ s³ 이 정확하므로
+s = (target/current)^(1/3) 다. `compute_buckling` 을 이분법으로 반복 호출하지 말 것.
+**균일 배율만 유효하다** — 적층 순서를 바꾸면 지수 법칙이 깨진다.
+
+**항복 게이트** — 등방 재료에 `sigma_y` 를 주면 `recover_ply_stresses` 가 von Mises 로
+탄성 가정 이탈을 판정한다. 실측 Cu/FR-4/Cu PCB 에 Nx=60 N/mm 에서 **항복강도의 2.19배**.
+`yielding` 블록이 나오면 응력·곡률·잔류가 모두 과대평가이니 그대로 보고하지 말 것.
+

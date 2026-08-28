@@ -1627,15 +1627,22 @@ def run_bistable_shapes(payload, delta_t=None, panel=None, delta_c=None,
     A, B, D, h, N_f, M_f = loads
 
     try:
-        kx_lin, ky_lin = NL.linear_curvatures(A, B, D, N_f, M_f)
+        kap_lin = NL.linear_curvature_vector(A, B, D, N_f, M_f)
+        kx_lin, ky_lin, kxy_lin = (float(kap_lin[0]), float(kap_lin[1]), float(kap_lin[2]))
+        en = NL.HyerEnergy(A, B, D, N_f, M_f, lx, ly)
+        span = NL.search_span(en, kx_lin, ky_lin)
+        sols = NL.find_equilibria(en, span)
+        crit = NL.critical_scale(A, B, D, N_f, M_f, lx, ly)
     except np.linalg.LinAlgError:
         return ENV.build(data=None, errors=[item("E400", field="laminate")], warnings=warnings,
                          payload=payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
-
-    en = NL.HyerEnergy(A, B, D, N_f, M_f, lx, ly)
-    span = NL.search_span(en, kx_lin, ky_lin)
-    sols = NL.find_equilibria(en, span)
-    crit = NL.critical_scale(A, B, D, N_f, M_f, lx, ly)
+    except (OverflowError, FloatingPointError) as exc:
+        # 유한·양수 입력이라도 극단 판 크기·물성 조합은 수치 범위를 넘는다 — 내부 오류가 아니다
+        return ENV.build(data=None, errors=[item("E100", field="panel",
+                                                 detail=f"판 크기·물성 조합이 수치 범위를 넘습니다 "
+                                                        f"({type(exc).__name__}). panel 단위를 확인하세요")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
 
     f = units.FROM_SI[si.unit_system]
     equilibria = []
@@ -1643,22 +1650,27 @@ def run_bistable_shapes(payload, delta_t=None, panel=None, delta_c=None,
         kap = np.array([s["a"], s["b"], 0.0])
         equilibria.append({
             "kappa_x": s["a"] * f["kappa"], "kappa_y": s["b"] * f["kappa"],
-            "shape": NL.classify_shape(s["a"], s["b"]),
+            "shape": NL.classify_shape(s["a"], s["b"], scale=span),
             "stable": s["stable"],
+            "stability": s["stability"],
             "energy_per_area": s["energy"] / (lx * ly) * f["energy_area"],
             "warpage_range": TH.warpage_over_panel(kap, lx, ly)["warpage_range"] * f["z"],
         })
-    stable = [e for e in equilibria if e["stable"]]
-    unstable = [e for e in equilibria if not e["stable"]]
+    stable = [e for e in equilibria if e["stability"] == "stable"]
+    unstable = [e for e in equilibria if e["stability"] == "unstable"]
+    marginal = [e for e in equilibria if e["stability"] == "marginal"]
 
     data: dict = {
         "linear_reference": {
             "kappa_x": kx_lin * f["kappa"], "kappa_y": ky_lin * f["kappa"],
+            "kappa_xy": kxy_lin * f["kappa"],
             "shape": NL.classify_shape(kx_lin, ky_lin),
-            "note": "선형 CLT 해 — 판 크기 무관. 임계 크기를 넘은 판에서는 실제로 실현되지 않는다",
+            "note": "선형 CLT 해 3성분 — 판 크기 무관. 임계 크기를 넘은 판에서는 실제로 실현되지 "
+                    "않는다. kappa_xy 는 이 모델이 표현하지 못하는 성분이라 대조용으로 함께 싣는다",
         },
         "equilibria": equilibria,
         "stable_count": len(stable),
+        "marginal_count": len(marginal),
         "bistable": len(stable) >= 2,
         "critical_panel": (
             {"Lx": crit["lx"] / units.TO_SI[si.unit_system]["length"],
@@ -1668,18 +1680,49 @@ def run_bistable_shapes(payload, delta_t=None, panel=None, delta_c=None,
             if crit["scale"] is not None else None),
     }
     if stable and unstable:
-        barrier = min(e["energy_per_area"] for e in unstable) - min(e["energy_per_area"] for e in stable)
+        # 스냅스루는 '어느 안정형상에서 빠져나오는가'에 따라 장벽이 다르다. 가장 깊은 우물만
+        # 보고하면 얕은 우물의 실제 장벽을 크게 과대평가한다(적대 검증 HYER-2: 최대 19배).
+        e_saddle = min(e["energy_per_area"] for e in unstable)
+        per_stable = [{"kappa_x": e["kappa_x"], "kappa_y": e["kappa_y"],
+                       "barrier": e_saddle - e["energy_per_area"]} for e in stable]
         data["energy_barrier"] = {
-            "value": barrier,
-            "definition": "불안정(안장) 해와 안정 해의 단위면적 에너지 차 — 스냅스루를 막는 장벽",
+            "min_barrier": min(b["barrier"] for b in per_stable),
+            "per_stable_shape": per_stable,
+            "definition": "각 안정형상에서 불안정(안장) 해까지의 단위면적 에너지 차. "
+                          "min_barrier 가 스냅스루를 지배하는 장벽이다 — 얕은 우물이 먼저 넘어간다",
             "note": "스냅 하중 자체는 하중 인가 평형 추적이 필요해 이 도구가 계산하지 않는다",
         }
 
     warn = list(warnings)
+    # 이 모델은 κxy = 0 을 가정한다. 선형 CLT가 유의한 κxy 를 낸다면 형상 판정 자체가 틀린다.
+    # A/B/D 의 16·26 성분비는 대리지표일 뿐이라 실제 κxy 로 판정한다 (적대 검증 HYER-1).
+    tw = abs(kxy_lin) / max(abs(kx_lin), abs(ky_lin), 1e-300)
+    if tw > 0.3:
+        warn.append(item("W130", field="laminae",
+                         detail=f"선형 CLT의 |κxy|/max(|κx|,|κy|) = {tw:.3g} — 비틀림이 지배적인데 "
+                                f"이 모델은 κxy = 0 을 가정한다. **형상 판정을 신뢰하지 말 것.** "
+                                f"compute_thermal_response 의 κ 3성분을 보라"))
+    elif tw > 0.05:
+        warn.append(item("W130", field="laminae",
+                         detail=f"선형 CLT의 |κxy|/max(|κx|,|κy|) = {tw:.3g} — 이 모델이 표현하지 "
+                                f"못하는 비틀림 성분이 있어 곡률·휨량이 과소평가된다"))
     if data["bistable"]:
         warn.append(item("W130", field="panel",
                          detail=f"판이 임계 크기를 넘어 안정 형상이 {len(stable)}개다 — "
                                 f"선형 해석(compute_thermal_response)의 안장 곡률은 실현되지 않는다"))
+    if data["bistable"] and crit["scale"] is None:
+        warn.append(item("W130", field="critical_panel",
+                         detail="이 판은 이미 쌍안정인데 임계 크기 추적에 실패했다(분기가 추적 "
+                                "가지 밖에서 일어남). critical_panel 은 null 이지만 분기는 이미 "
+                                "지난 상태다 — 모순으로 읽지 말 것"))
+    if not stable:
+        warn.append(item("W130", field="equilibria",
+                         detail=f"이 판 크기에서 안정 평형해를 찾지 못했다(정지점 {len(sols)}개). "
+                                f"결과를 신뢰하지 말고 판 크기를 바꿔 경향을 확인할 것"))
+    if marginal:
+        warn.append(item("W130", field="equilibria",
+                         detail=f"판이 분기점 바로 근처라 정지점 {len(marginal)}개의 안정성 판정이 "
+                                f"한계적이다(Hessian 최소 고윳값 ≈ 0). stable_count 를 단정하지 말 것"))
     for mat, nm in ((A, "A"), (B, "B"), (D, "D")):
         if _offaxis_ratio(mat) > 0.1:
             warn.append(item("W130", field="laminae",
@@ -1691,7 +1734,10 @@ def run_bistable_shapes(payload, delta_t=None, panel=None, delta_c=None,
         "Hyer 모델: w = −½(κx x² + κy y²), 면내 변형은 von Karman 적합조건 "
         "ε_x,yy + ε_y,xx = −κxκy 를 만족하는 최소 다항족 (Rayleigh–Ritz 3자유도)",
         "원통(κxκy=0)은 전개 가능면이라 막 벌점이 없고, 안장은 L⁴ 벌점을 받는다 — 이것이 분기의 원인",
-        "한계: γxy⁰=0·κxy=0 (비틀림 형상 미표현), 자유 경계, 저차 근사 — 곡률 절대값은 FE 대비 오차가 있다",
+        "면내 전단 γxy⁰ = k·x·y 자유도를 포함한다(4자유도) — 이걸 빼면 안장 가지의 막 벌점이 "
+        "과대평가돼 없는 쌍안정을 만들어낸다",
+        "한계: κxy = 0 이라 비틀림 형상은 표현하지 못한다. 자유 경계, 저차 근사 — 곡률 절대값은 "
+        "FE 대비 오차가 있다",
         "정지점 탐색은 고정 격자 스캔 + 고정 반복 뉴턴 (결정론적, 난수 없음)",
         *_source_assumptions(si),
     ]
@@ -1734,10 +1780,13 @@ def run_large_deflection(payload, panel, pressure, edge_condition: str = "movabl
     q_si = float(pressure) * units.TO_SI[si.unit_system]["modulus"]
     try:
         res = NL.large_deflection(D_use, A, lx, ly, q_si, edge_condition == "immovable")
-    except ValueError as e:
+    except (ValueError, OverflowError, FloatingPointError) as e:
         return ENV.build(data=None, errors=[item("E100", field="laminate", detail=str(e))],
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
+    except np.linalg.LinAlgError:
+        return ENV.build(data=None, errors=[item("E400", field="laminate")], warnings=warnings,
+                         payload=payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
 
     f = units.FROM_SI[si.unit_system]
     ratio = abs(res["w_center"]) / h
@@ -1766,6 +1815,16 @@ def run_large_deflection(payload, panel, pressure, edge_condition: str = "movabl
         warn.append(item("W130", field="edge_condition",
                          detail="면내 이동 자유 가정 — 실제 가장자리가 구속되면 처짐이 더 작다 "
                                 "(등방 정사각에서 β가 약 3.9배). 두 극단을 모두 확인할 것"))
+    aspect = max(lx, ly) / min(lx, ly)
+    if aspect > 2.0:
+        warn.append(item("W130", field="panel",
+                         detail=f"종횡비 {aspect:.3g} — 1항 Galerkin은 세장 판에서 처짐을 "
+                                f"**과소평가**한다(종횡비 10에서 약 1.6배). 여유가 빠듯하면 FE로 확인할 것"))
+    off = _offaxis_ratio(A)
+    if off > 0.1:
+        warn.append(item("W130", field="laminae",
+                         detail=f"A16/A26 성분비 {off:.3g} — 1항 해는 면내 직교이방(A16=A26=0)을 "
+                                f"전제한다. 불균형 적층에서는 β 근사 오차가 커진다"))
     extra = [
         "SS(단순지지) 4변, 1항 Galerkin 근사 — 처짐 절대값은 FE 대비 오차가 있다 "
         "(선형 극한에서 등방 정사각 기준 +2.4%)",
@@ -1818,8 +1877,18 @@ def run_postbuckling(payload, panel, applied_Nx, load_ratio: float = 0.0,
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
     n_si = float(applied_Nx) * units.TO_SI[si.unit_system]["load_n"]
-    pb = NL.postbuckling(D_use, A, lx, ly, res["mode_m"], res["mode_n"],
-                         res["N_cr"], n_si, h)
+    try:
+        pb = NL.postbuckling(D_use, A, lx, ly, res["mode_m"], res["mode_n"],
+                             res["N_cr"], n_si, h, load_ratio=float(load_ratio))
+    except np.linalg.LinAlgError:
+        return ENV.build(data=None, errors=[item("E400", field="laminate")], warnings=warnings,
+                         payload=payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+    except (OverflowError, FloatingPointError) as exc:
+        return ENV.build(data=None, errors=[item("E100", field="panel",
+                                                 detail=f"판 크기·하중 조합이 수치 범위를 넘습니다 "
+                                                        f"({type(exc).__name__})")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
 
     f = units.FROM_SI[si.unit_system]
     data = {
@@ -1849,6 +1918,11 @@ def run_postbuckling(payload, panel, applied_Nx, load_ratio: float = 0.0,
     warn.append(item("W130", field="edges",
                      detail="비재하 가장자리 면내 이동 자유 가정 — 구속되면 진폭은 작아지고 "
                             "강성비는 커진다(비보수 방향 아님)"))
+    off_pb = _offaxis_ratio(A)
+    if off_pb > 0.1:
+        warn.append(item("W130", field="laminae",
+                         detail=f"A16/A26 성분비 {off_pb:.3g} — 1항 해는 면내 직교이방을 전제한다. "
+                                f"불균형 적층에서는 강성비·진폭 근사 오차가 커진다"))
     if pb["buckled"] and pb["amplitude_over_thickness"] > 3.0:
         warn.append(item("W130", field="amplitude",
                          detail=f"W/h = {pb['amplitude_over_thickness']:.3g} — 1항 근사의 유효 범위를 "
@@ -1857,6 +1931,7 @@ def run_postbuckling(payload, panel, applied_Nx, load_ratio: float = 0.0,
         "SS 4변, 1항 Galerkin — 좌굴 모드 (m,n)은 compute_buckling과 동일한 스캔으로 결정",
         "강성비는 끝단 수축 e = a11·N + W²p²/8 의 미분에서 유도 (등방 정사각에서 정확히 0.5)",
         "b_eff/b = √(N_cr/N) 은 von Karman 유효폭 — 후좌굴 하중 재분배의 반경험 지표",
+        "강성비는 2축 하중비 R = Ny/Nx 를 반영한다 — R>0(2축 압축)이면 남는 강성이 크게 줄어든다",
         *_source_assumptions(si),
     ]
     hash_payload = {"laminate": payload, "panel": panel, "applied_Nx": applied_Nx,

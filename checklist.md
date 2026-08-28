@@ -58,7 +58,10 @@
 - [ ] (보류) 채널링 g(α,β) 보정표 — 수기 이식 리스크로 미탑재 유지 (계획서 §17.7.3)
 - [x] ~~기하 비선형 (V3)~~ — v0.8.0: compute_bistable_shapes(Hyer 쌍안정·임계 판 크기)
       + compute_large_deflection(von Karman, movable/immovable) + compute_postbuckling
-      + 선형 도구 유효범위 게이트(thermal warpage w/h>0.3 → W130). 도구 24종, 테스트 243
+      + 선형 도구 유효범위 게이트(thermal warpage w/h>0.3 → W130). 도구 24종
+- [x] ~~V3 적대 검증~~ — v0.9.1: 후보 23건 중 확정 13/반증 7. γxy⁰ 자유도 추가(허위 쌍안정 제거),
+      κxy 게이트(대리지표→실제 곡률), 형상별 에너지 장벽, 좌굴후 강성비 R 반영,
+      막 컴플라이언스 3×3 역행렬, 세장판·한계안정성 경고, E501 누출 차단. 테스트 281
 - [x] ~~재료 전단 비선형~~ — v0.9.0 solve_nonlinear_shear_response (Hahn–Tsai 할선 고정반복,
       구성식 잔차 1e-11, [±45] τ=Nx/2h 폐형해 일치, 선형 도구 역게이트). 도구 25종, 테스트 269
 

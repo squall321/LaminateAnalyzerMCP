@@ -173,8 +173,16 @@ margin<1이면 박리 예상. `ilss_unevaluated`가 있으면 그 위치는 강�
   얇을수록 작은 판에서 쌍안정이 된다.
 - `energy_barrier`는 스냅스루를 막는 장벽(단위면적). **스냅 하중 자체는 주지 않는다** — 그건
   하중 인가 평형 추적이 필요하다. 액추에이터 설계 질문이면 이 한계를 먼저 알릴 것.
-- **한계**: γxy⁰=0·κxy=0 이라 **비틀림 형상을 표현하지 못한다**. [±θ] 반대칭의 실제 경화 형상은
-  비틀림이므로 W130이 뜨면 결과를 형상 판정에 쓰지 말 것.
+- **한계**: κxy = 0 이라 **비틀림 형상을 표현하지 못한다**. 선형 CLT의 |κxy|/max(|κx|,|κy|) 로
+  판정해 0.05 초과면 W130, **0.3 초과면 "형상 판정을 신뢰하지 말 것"** 이 뜬다 — 그때는
+  `compute_thermal_response` 의 κ 3성분을 대신 보고할 것. `linear_reference.kappa_xy` 로 직접
+  대조할 수 있다. (적대 검증 전에는 A/B/D 의 16·26 성분비라는 대리지표를 써서 [0/90/45/90]
+  같은 케이스를 통째로 놓쳤다.)
+- `energy_barrier.min_barrier` 가 스냅스루 지배 장벽이다 — **얕은 우물이 먼저 넘어간다**.
+  `per_stable_shape` 로 형상별 장벽을 볼 수 있다. 가장 깊은 우물 기준 단일 값을 쓰면 최대
+  19배 낙관적이 된다.
+- `stability` 가 `marginal` 인 정지점이 있으면 판이 분기점 바로 근처라 안정성 단정이 무의미하다
+  — `stable_count` 를 그대로 보고하지 말 것.
 
 **`compute_large_deflection(laminate, panel, pressure, edge_condition)`** — w > h 영역의 처짐.
 선형은 w ∝ q 지만 막 신장이 개입하면 실제 처짐이 훨씬 작아진다(`stiffening_ratio`가 그 배수).
@@ -186,8 +194,13 @@ margin<1이면 박리 예상. `ilss_unevaluated`가 있으면 그 위치는 강�
 
 **`compute_postbuckling(laminate, panel, applied_Nx)`** — `compute_buckling`은 N_cr까지만 답한다.
 박판은 좌굴 후에도 하중을 더 받으며, 면내 접선강성이 떨어지고 하중이 가장자리로 재분배된다.
-`stiffness_ratio`(등방 정사각에서 정확히 0.5), `effective_width_ratio`(b_eff/b=√(N_cr/N)),
-`amplitude_over_thickness`를 준다. N_cr·모드는 `compute_buckling`과 동일하다.
+`stiffness_ratio`, `effective_width_ratio`(b_eff/b=√(N_cr/N)), `amplitude_over_thickness`를 준다.
+N_cr·모드는 `compute_buckling`과 동일하다.
+
+- **강성비는 2축 하중비 R = Ny/Nx 에 크게 좌우된다.** 등방 정사각 R=0 에서 정확히 0.5 지만
+  R=1(2축 등압축)에서 0.26, R=2 에서 0.12 로 떨어진다. R 을 안 넣고 0.5 를 가정하면 남은
+  강성을 최대 4배 과대평가한다.
+- 종횡비가 크거나(>2) A16/A26 이 유의한 불균형 적층이면 1항 근사 오차를 W130으로 알린다.
 
 **`solve_nonlinear_shear_response(laminate, loads)`** — 위 셋은 **기하** 비선형(형상이 커서
 생기는 것)이고 이것은 **재료** 비선형이다. UD 복합재의 면내 전단은 기지 지배라 뚜렷이

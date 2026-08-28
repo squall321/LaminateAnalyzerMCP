@@ -15,6 +15,7 @@ GRID_N = 15              # a·b 각 방향 후보 격자
 NEWTON_STEPS = 40        # 고정 반복수 (수렴 판정으로 조기 종료하지 않음)
 DEDUP_RTOL = 1.0e-4      # 해 중복 판정 (탐색 폭 대비)
 HESS_EPS_RATIO = 1.0e-5  # 수치 Hessian 스텝 (탐색 폭 대비)
+MARGINAL_RATIO = 1.0e-8  # |최소고윳값|이 이 비율 이하면 안정성 판정을 marginal 로 둔다
 
 
 # ── 1) Hyer bistability ─────────────────────────────────────────────────────
@@ -25,19 +26,26 @@ class HyerEnergy:
     면내 변형은 von Karman **적합조건** ε_x,yy + ε_y,xx − γ_xy,xy = w,xy² − w,xx w,yy = −ab
     를 만족하는 최소 다항 족으로 잡는다::
 
-        ε_x⁰ = c₁ − d₁ y²,   ε_y⁰ = c₂ + (d₁ − ab/2) x²,   γ_xy⁰ = 0
+        ε_x⁰ = c₁ − d₁ y²,   ε_y⁰ = c₂ + (d₁ + (k − ab)/2) x²,   γ_xy⁰ = k x y
 
     이 형태가 핵심이다. ab = 0(원통)이면 우변이 0이라 균일 변형이 적합해 **막 에너지
     벌점이 없고**(원통은 전개 가능면), ab ≠ 0(안장·구면)이면 변형이 2차로 변해야 해
     L⁴ 벌점이 붙는다. 판이 커질수록 안장이 불리해져 원통 두 개로 분기하는 것이 곧
-    쌍안정성이다. c₁·c₂·d₁ 은 에너지의 2차항이라 선형계로 정확히 소거한다.
+    쌍안정성이다. c₁·c₂·d₁·k 는 에너지의 2차항이라 4×4 선형계로 정확히 소거한다.
 
-    한계: γ_xy⁰ = 0 · κ_xy = 0 이라 **비틀림 형상을 표현하지 못한다**. [±θ] 반대칭
-    적층의 실제 경화 형상은 비틀림이므로 이 모델을 쓰면 안 된다(파이프라인에서 경고).
+    면내 전단 자유도 k 를 반드시 넣어야 한다. 중심 원점 사각영역에서 xy 와 {1, x², y²}
+    의 교차적분이 모두 0이라 이 항은 **A66·k²·∫(xy)² 벌점으로만** 들어간다(A16/A26 커플링·
+    B16/B26 모멘트항·N6 하중항은 적분이 0이라 소멸). γ_xy⁰ = 0 으로 묶어 두면 안장 가지의
+    막 벌점이 과대평가돼 **없는 쌍안정을 만들어낸다** — 적대 검증에서 [0/0/90] 이 실측
+    사례였다(3자유도는 안정해 2개, 4자유도는 1개).
+
+    한계: κ_xy = 0 이라 **비틀림 형상은 여전히 표현하지 못한다**. [±θ] 반대칭 적층의 실제
+    경화 형상은 비틀림이므로 이 모델을 쓰면 안 된다(파이프라인이 선형 CLT의 κ_xy 로 판정).
     """
 
     def __init__(self, A, B, D, N_f, M_f, lx: float, ly: float):
         self.A11, self.A12, self.A22 = float(A[0, 0]), float(A[0, 1]), float(A[1, 1])
+        self.A66 = float(A[2, 2])
         self.B11, self.B12, self.B22 = float(B[0, 0]), float(B[0, 1]), float(B[1, 1])
         self.D11, self.D12, self.D22 = float(D[0, 0]), float(D[0, 1]), float(D[1, 1])
         self.N1, self.N2 = float(N_f[0]), float(N_f[1])
@@ -51,12 +59,19 @@ class HyerEnergy:
         # 기저 f = [1, x², y²] 에 대한 ∫f_i f_j dA 와 ∫f_i dA
         self.G = np.array([[s0, sx2, sy2], [sx2, sx4, sxy], [sy2, sxy, sy4]])
         self.m = np.array([s0, sx2, sy2])
-        # ε_x = Pu·q, ε_y = Pv·q + v0(a,b)   (q = [c₁, c₂, d₁])
-        self.Pu = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, -1.0]])
-        self.Pv = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]])
+        self.Sxy2 = sxy                      # ∫(xy)² dA — γ_xy⁰ 벌점 계수
+        # q = [c₁, c₂, d₁, k];  ε_x = Pu·q,  ε_y = Pv·q + v0(a,b),  γ_xy = (Pg·q)·x·y
+        self.Pu = np.array([[1.0, 0.0, 0.0, 0.0],
+                            [0.0, 0.0, 0.0, 0.0],
+                            [0.0, 0.0, -1.0, 0.0]])
+        self.Pv = np.array([[0.0, 1.0, 0.0, 0.0],
+                            [0.0, 0.0, 1.0, 0.5],
+                            [0.0, 0.0, 0.0, 0.0]])
+        self.Pg = np.array([0.0, 0.0, 0.0, 1.0])
         self._Hq = (self.A11 * self.Pu.T @ self.G @ self.Pu
                     + self.A12 * (self.Pu.T @ self.G @ self.Pv + self.Pv.T @ self.G @ self.Pu)
-                    + self.A22 * self.Pv.T @ self.G @ self.Pv)
+                    + self.A22 * self.Pv.T @ self.G @ self.Pv
+                    + self.A66 * np.outer(self.Pg, self.Pg) * self.Sxy2)
 
     # -- 면내 자유도 소거 ----------------------------------------------------
     def _v0(self, a: float, b: float) -> np.ndarray:
@@ -72,16 +87,16 @@ class HyerEnergy:
 
     def _fields(self, a: float, b: float):
         q = self.membrane_dofs(a, b)
-        return self.Pu @ q, self.Pv @ q + self._v0(a, b)
+        return self.Pu @ q, self.Pv @ q + self._v0(a, b), float(self.Pg @ q)
 
     # -- 에너지·도함수 -------------------------------------------------------
     def energy(self, a: float, b: float) -> float:
-        u, v = self._fields(a, b)
+        u, v, k = self._fields(a, b)
         Iu, Iv = float(u @ self.m), float(v @ self.m)
         Bu, Bv = self.B11 * a + self.B12 * b, self.B12 * a + self.B22 * b
         return float(
             0.5 * (self.A11 * u @ self.G @ u + 2 * self.A12 * u @ self.G @ v
-                   + self.A22 * v @ self.G @ v)
+                   + self.A22 * v @ self.G @ v + self.A66 * k * k * self.Sxy2)
             + Bu * Iu + Bv * Iv
             + 0.5 * (self.D11 * a * a + 2 * self.D12 * a * b + self.D22 * b * b) * self.S0
             - self.N1 * Iu - self.N2 * Iv - (self.M1 * a + self.M2 * b) * self.S0)
@@ -91,7 +106,7 @@ class HyerEnergy:
 
         a,b 는 v0 (적합조건 특수해) · B·D·M 항으로만 들어간다.
         """
-        u, v = self._fields(a, b)
+        u, v, _k = self._fields(a, b)   # γ_xy 항은 a,b 에 직접 의존하지 않아 ∂/∂a 기여 0
         Iu, Iv = float(u @ self.m), float(v @ self.m)
         Bv = self.B12 * a + self.B22 * b
         out = []
@@ -118,11 +133,22 @@ class HyerEnergy:
         return np.array([[h11, h12], [h12, h22]])
 
 
-def linear_curvatures(A, B, D, N_f, M_f) -> tuple[float, float]:
-    """선형 CLT 해 (비교·탐색 폭 기준)."""
+def linear_curvature_vector(A, B, D, N_f, M_f) -> np.ndarray:
+    """선형 CLT 곡률 3성분 (κx, κy, κxy).
+
+    κxy 를 버리면 안 된다 — 이 모델은 κxy = 0 을 가정하므로, 선형 해가 유의한 κxy 를
+    낸다면 그 적층에는 애초에 적용할 수 없다. 그 판정에 쓰려고 3성분을 모두 돌려준다
+    (적대 검증 HYER-1: κxy 가 κx 의 59%인 적층이 아무 경고 없이 통과했다).
+    """
     K = np.block([[A, B], [B, D]])
     sol = np.linalg.solve(K, np.concatenate([N_f, M_f]))
-    return float(sol[3]), float(sol[4])
+    return np.array([float(sol[3]), float(sol[4]), float(sol[5])])
+
+
+def linear_curvatures(A, B, D, N_f, M_f) -> tuple[float, float]:
+    """선형 CLT 면내 두 곡률 (비교·탐색 폭 기준)."""
+    k = linear_curvature_vector(A, B, D, N_f, M_f)
+    return float(k[0]), float(k[1])
 
 
 def search_span(en: HyerEnergy, kx_lin: float, ky_lin: float) -> float:
@@ -147,7 +173,13 @@ def search_span(en: HyerEnergy, kx_lin: float, ky_lin: float) -> float:
 def find_equilibria(en: HyerEnergy, span: float) -> list[dict]:
     """고정 격자 스캔 + 고정 반복수 뉴턴으로 정지점을 모두 찾는다 (결정론)."""
     grid = np.linspace(-span, span, GRID_N)
+    # 잔차 기준은 판 면적에 비례하는 M 항만으로는 부족하다 — 큰 판에서는 막 항이 L⁶로
+    # 커져 참 평형해가 "수렴 실패"로 탈락한다. 격자 모서리에서 실제 gradient 크기를 재
+    # 척도로 삼는다(고정 probe 점이라 결정론 유지).
+    probe = max(float(np.linalg.norm(en.gradient(sx * span, sy * span)))
+                for sx, sy in ((1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)))
     ref = max(abs(en.M1), abs(en.M2), en.D11 * span, 1e-300) * en.S0
+    ref = max(ref, probe)
     sols: list[dict] = []
     for a0 in grid:
         for b0 in grid:
@@ -172,20 +204,36 @@ def find_equilibria(en: HyerEnergy, span: float) -> list[dict]:
             if any(abs(a - s["a"]) < tol and abs(b - s["b"]) < tol for s in sols):
                 continue
             eig = np.linalg.eigvalsh(en.hessian(a, b, span))
+            scale = max(abs(float(eig[0])), abs(float(eig[-1])), 1e-300)
+            # 분기점 바로 위/아래에서는 고윳값이 0 근처라 stable/unstable 판정이 무의미하다.
+            # bool 하나로 단정하지 말고 marginal 을 따로 표시해 호출부가 경고하게 한다.
+            if float(eig[0]) > MARGINAL_RATIO * scale:
+                state = "stable"
+            elif float(eig[0]) < -MARGINAL_RATIO * scale:
+                state = "unstable"
+            else:
+                state = "marginal"
             sols.append({"a": a, "b": b, "energy": en.energy(a, b),
-                         "stable": bool(eig[0] > 0), "min_eig": float(eig[0])})
+                         "stable": state == "stable", "stability": state,
+                         "min_eig": float(eig[0])})
     sols.sort(key=lambda s: (round(s["energy"], 12), round(s["a"], 12)))
     return sols
 
 
-def classify_shape(a: float, b: float, tol_ratio: float = 0.1) -> str:
-    """곡률 조합 → 형상 이름."""
+def classify_shape(a: float, b: float, tol_ratio: float = 0.1,
+                   scale: float | None = None) -> str:
+    """곡률 조합 → 형상 이름.
+
+    부호 판정에 a*b 를 쓰면 곡률이 작을 때 곱이 언더플로해 안장이 spherical 로 뒤집힌다
+    (적대 검증 SHAPE-1). 부호를 직접 비교한다. scale 을 주면 그 대비 문턱 아래를 flat 으로
+    판정해 비정규수(subnormal) 곡률이 형상으로 둔갑하는 것을 막는다.
+    """
     mag = max(abs(a), abs(b))
-    if mag <= 0:
+    if mag <= 0 or (scale is not None and mag <= 1e-12 * abs(scale)):
         return "flat"
     if min(abs(a), abs(b)) / mag < tol_ratio:
         return "cylindrical"
-    return "saddle" if a * b < 0 else "spherical"
+    return "saddle" if (a < 0.0) != (b < 0.0) else "spherical"
 
 
 # ── 2) 대처짐 (von Karman 1항 Galerkin, Cardano 폐형해) ─────────────────────
@@ -203,10 +251,15 @@ def vk_coefficients(d_use: np.ndarray, A: np.ndarray, p: float, q: float,
     p2, q2 = p * p, q * q
     alpha = (d_use[0, 0] * p2 * p2 + 2.0 * (d_use[0, 1] + 2.0 * d_use[2, 2]) * p2 * q2
              + d_use[1, 1] * q2 * q2)
-    a_in = np.linalg.inv(np.asarray(A)[:2, :2])
+    # Airy 적합조건의 컴플라이언스는 **3×3 A의 역행렬**의 좌상 2×2 이다. 2×2 블록만
+    # 뒤집으면 A16/A26 이 있는 불균형 적층에서 β를 과대평가해 처짐·좌굴후 진폭을
+    # 과소평가한다(적대 검증 VK-1: [30]₄ 에서 β 1.91배, 처짐 0.81배).
+    a_in = np.linalg.inv(np.asarray(A))[:2, :2]
     beta = p2 * p2 / (16.0 * a_in[0, 0]) + q2 * q2 / (16.0 * a_in[1, 1])
     if immovable:
-        beta += (A[0, 0] * p2 * p2 + 2.0 * A[0, 1] * p2 * q2 + A[1, 1] * q2 * q2) / 8.0
+        # 면내 구속 항의 균일 막력은 그 컴플라이언스의 역이다 (N̄xy = 0 가정)
+        a2 = np.linalg.inv(a_in)
+        beta += (a2[0, 0] * p2 * p2 + 2.0 * a2[0, 1] * p2 * q2 + a2[1, 1] * q2 * q2) / 8.0
     return float(alpha), float(beta)
 
 
@@ -224,8 +277,13 @@ def large_deflection(d_use: np.ndarray, A: np.ndarray, lx: float, ly: float,
                 "alpha": alpha, "beta": beta}
     # βW³ + αW − q_eff = 0 → Cardano (α,β>0 이므로 실근 1개)
     pc, rc = alpha / beta, -q_eff / beta
-    sq = math.sqrt((rc / 2.0) ** 2 + (pc / 3.0) ** 3)
-    w = float(np.cbrt(-rc / 2.0 + sq) + np.cbrt(-rc / 2.0 - sq))
+    try:
+        sq = math.sqrt((rc / 2.0) ** 2 + (pc / 3.0) ** 3)
+        w = float(np.cbrt(-rc / 2.0 + sq) + np.cbrt(-rc / 2.0 - sq))
+    except (OverflowError, ValueError) as exc:   # 극단 판/압력에서 판별식이 넘친다
+        raise ValueError(f"판 크기·압력 조합이 수치 범위를 넘습니다 ({type(exc).__name__})") from exc
+    if not math.isfinite(w):
+        raise ValueError("판 크기·압력 조합이 수치 범위를 넘습니다 (비유한 해)")
     return {"w_center": w, "w_linear": w_lin,
             "stiffening_ratio": w_lin / w if w != 0 else 1.0,
             "alpha": alpha, "beta": beta}
@@ -235,22 +293,28 @@ def large_deflection(d_use: np.ndarray, A: np.ndarray, lx: float, ly: float,
 
 def postbuckling(d_use: np.ndarray, A: np.ndarray, lx: float, ly: float,
                  mode_m: int, mode_n: int, n_cr: float, n_applied: float,
-                 h: float) -> dict:
+                 h: float, load_ratio: float = 0.0) -> dict:
     """N > N_cr 에서의 진폭·면내 강성비·유효폭 (§18.4).
 
     §18.3과 같은 1항 Galerkin에서 압력 대신 압축 막력을 넣으면
     αW − N(p² + R q²)W + βW³ = 0 → W² = (α/β)(N/N_cr − 1) 이 나온다.
-    강성비는 끝단 수축 e = a11·N + W²p²/8 을 미분해 얻는다 (하드코딩 아님).
+    강성비는 끝단 수축 e = (a11 + R·a12)·N + W²p²/8 을 미분해 얻는다 (하드코딩 아님).
+    **2축 하중비 R = Ny/Nx 를 반드시 넣어야 한다.** R 을 빼면 등방 정사각 R=0 에서만
+    맞고 R>0(2축 압축)에서 남은 강성을 크게 과대평가한다 — 적대 검증 PB-1 실측으로
+    R=1 에서 0.5 대 0.259(1.93배 비보수), R=2 에서 4.25배.
     가장자리 면내 이동 자유 가정 — 구속 시 진폭은 더 작고 강성비는 더 크다.
     """
     p, q = mode_m * math.pi / lx, mode_n * math.pi / ly
     alpha, beta = vk_coefficients(d_use, A, p, q, immovable=False)
-    a11 = float(np.linalg.inv(np.asarray(A)[:2, :2])[0, 0])
-    # 좌굴 후 면내 접선강성비 S = a11 / (a11 + p⁴/(8β)) — 등방 정사각에서 정확히 0.5
-    stiff = a11 / (a11 + p ** 4 / (8.0 * beta)) if beta > 0 else 1.0
+    a_in = np.linalg.inv(np.asarray(A))[:2, :2]
+    a_eff = float(a_in[0, 0] + load_ratio * a_in[0, 1])   # (a11 + R·a12)
+    # S = (a11+R a12) / [(a11+R a12) + p²(p²+R q²)/(8β)] — 등방 정사각 R=0 에서 정확히 0.5
+    denom = a_eff + p * p * (p * p + load_ratio * q * q) / (8.0 * beta) if beta > 0 else None
+    stiff = (a_eff / denom) if (denom is not None and denom != 0.0) else 1.0
     lr = n_applied / n_cr if n_cr > 0 else float("inf")
     out = {"load_ratio": lr, "stiffness_ratio": float(stiff),
-           "definition": "W=√((α/β)(N/N_cr−1)), 강성비=a11/(a11+p⁴/8β), b_eff/b=√(N_cr/N)"}
+           "definition": "W=√((α/β)(N/N_cr−1)), "
+                         "강성비=(a11+R·a12)/[(a11+R·a12)+p²(p²+R·q²)/(8β)], b_eff/b=√(N_cr/N)"}
     if lr <= 1.0:
         out.update({"buckled": False,
                     "note": "N ≤ N_cr — 좌굴 전. compute_buckling 의 여유율을 보라"})

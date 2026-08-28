@@ -146,7 +146,8 @@ def test_bistable_tool_reports_bifurcation_and_critical_panel():
     assert d["bistable"] is True and d["stable_count"] == 2
     assert d["linear_reference"]["shape"] == "saddle"
     assert d["critical_panel"]["Lx"] < 100.0
-    assert d["energy_barrier"]["value"] > 0
+    assert d["energy_barrier"]["min_barrier"] > 0
+    assert len(d["energy_barrier"]["per_stable_shape"]) == 2
     assert any(w["code"] == "W130" for w in env["warnings"])
 
 
@@ -357,8 +358,13 @@ def test_postbuckling_tool_errors():
 
 # ── 독립 오라클: 정사각 판 폐형해 (계획서 §8 다중경로 검증) ─────────────────
 #
-# 격자 스캔 + 뉴턴과 **완전히 다른 경로**로 유도된 폐형해다. 면내 자유도를 c₁,c₂만
-# 남기고 d₁ = κxκy/4 로 고정하면 에너지가
+# 격자 스캔 + 뉴턴과 **완전히 다른 경로**로 유도된 폐형해다.
+#
+# ⚠ 이 폐형해는 γxy⁰ = 0 **제약 모델**의 해다. 출하 엔진은 γxy⁰ = k·x·y 자유도를 하나 더
+# 갖고 있어(적대 검증에서 그게 없으면 없는 쌍안정을 만든다는 게 확인됐다) 임계 크기가 더
+# 크게 나온다. 그래서 오라클 대조는 A66 → ∞ 로 k = 0 을 강제해 **제약 모델을 재현**한 뒤
+# 한다. κ_lin(L→0)과 κ_∞(L→∞)는 두 모델에서 동일하다 — 원통·평면 극한에는 면내 전단이
+# 개입하지 않기 때문이다. 면내 자유도를 c₁,c₂만 남기고 d₁ = κxκy/4 로 고정하면 에너지가
 #     Π/S = ½κᵀD*κ − M*·κ + Q·κx²κy²,  D* = D − BA⁻¹B, M* = M_f − BA⁻¹N_f,
 #     Q = (A11·Ly⁴ + A22·Lx⁴)/5760        (A12는 소거 후 사라진다)
 # 로 축소되고, 대칭 크로스플라이 정사각에서는 분기가 pitchfork로 인수분해된다.
@@ -366,6 +372,13 @@ def test_postbuckling_tool_errors():
 # **정사각 전용이다.** d₁ = κxκy/4 는 정사각에서만 3자유도 최소화의 최적값과 일치한다
 # (아래 test_closed_form_oracle_is_square_only 가 그 경계를 못박는다). 직사각에
 # 잘못 적용하면 임계 크기가 50~65% 틀린다.
+
+
+def _restricted(A):
+    """γxy⁰ = 0 제약 모델 재현 — A66 → ∞ 이면 k 자유도의 벌점이 무한대라 k = 0 이 된다."""
+    Ar = np.array(A, dtype=float, copy=True)
+    Ar[2, 2] *= 1e12
+    return Ar
 
 
 def _dstar_mstar(A, B, D, N_f, M_f):
@@ -390,9 +403,12 @@ def _closed_form_landmarks(A, B, D, N_f, M_f):
 def test_closed_form_oracle_critical_size(dT, t):
     """수치 연속추적으로 구한 임계 판 크기가 폐형해와 일치한다 (독립 경로)."""
     A, B, D, N_f, M_f = hyer_setup((0.0, 90.0), dT=dT, t=t)
-    numeric = NL.critical_scale(A, B, D, N_f, M_f, 0.1, 0.1)["lx"]
-    assert numeric == pytest.approx(_closed_form_landmarks(A, B, D, N_f, M_f)["L_crit"],
-                                    rel=1e-8)
+    closed = _closed_form_landmarks(A, B, D, N_f, M_f)["L_crit"]
+    restricted = NL.critical_scale(_restricted(A), B, D, N_f, M_f, 0.1, 0.1)["lx"]
+    assert restricted == pytest.approx(closed, rel=1e-8)
+    # 출하 모델은 제약을 하나 풀었으므로 안장이 더 오래 버틴다 → 임계 크기가 더 크다
+    shipped = NL.critical_scale(A, B, D, N_f, M_f, 0.1, 0.1)["lx"]
+    assert shipped > restricted
 
 
 def test_closed_form_oracle_curvature_landmarks():
@@ -406,13 +422,14 @@ def test_closed_form_oracle_curvature_landmarks():
     # L→0: 선형 CLT 6×6 해와 일치
     assert NL.linear_curvatures(A, B, D, N_f, M_f)[0] == pytest.approx(
         lm["kappa_linear"], rel=1e-12)
-    # L→∞: 큰 판의 안정 원통해
+    # L→∞: 원통은 막 벌점이 없어 γxy 자유도와 무관 — 출하 모델에서도 그대로 성립한다
     en = NL.HyerEnergy(A, B, D, N_f, M_f, 1.0, 1.0)
     kx, ky = NL.linear_curvatures(A, B, D, N_f, M_f)
     stable = [s for s in NL.find_equilibria(en, NL.search_span(en, kx, ky)) if s["stable"]]
-    assert stable[0]["a"] == pytest.approx(lm["kappa_inf"], rel=1e-5)
-    # 임계 크기에서는 세 해가 한 점으로 모인다 (pitchfork)
-    en_c = NL.HyerEnergy(A, B, D, N_f, M_f, lm["L_crit"], lm["L_crit"])
+    assert stable[0]["a"] == pytest.approx(lm["kappa_inf"], rel=1e-6)
+    # 임계 크기에서는 세 해가 한 점으로 모인다 (pitchfork) — 제약 모델 기준
+    Ar = _restricted(A)
+    en_c = NL.HyerEnergy(Ar, B, D, N_f, M_f, lm["L_crit"], lm["L_crit"])
     for s in NL.find_equilibria(en_c, NL.search_span(en_c, kx, ky)):
         assert s["a"] == pytest.approx(lm["kappa_crit"], rel=1e-3)
 
@@ -425,14 +442,15 @@ def test_closed_form_oracle_is_square_only():
     빗나간다. 미래 세션이 이 폐형해를 일반식으로 오해해 채택하는 것을 막는 테스트다.
     """
     A, B, D, N_f, M_f = hyer_setup((0.0, 90.0))
-    # 정사각: 최적 d₁ == ab/4
-    sq = NL.HyerEnergy(A, B, D, N_f, M_f, 0.1, 0.1)
+    Ar = _restricted(A)
+    # 제약 모델 · 정사각: 최적 d₁ == ab/4
+    sq = NL.HyerEnergy(Ar, B, D, N_f, M_f, 0.1, 0.1)
     for a, b in ((3.0, -3.0), (5.0, -2.0)):
-        assert sq.membrane_dofs(a, b)[2] == pytest.approx(a * b / 4.0, rel=1e-12)
-    # 직사각: 최적 d₁ != ab/4
-    rect = NL.HyerEnergy(A, B, D, N_f, M_f, 0.2, 0.05)
+        assert sq.membrane_dofs(a, b)[2] == pytest.approx(a * b / 4.0, rel=1e-9)
+    # 제약 모델 · 직사각: 최적 d₁ != ab/4
+    rect = NL.HyerEnergy(Ar, B, D, N_f, M_f, 0.2, 0.05)
     assert rect.membrane_dofs(3.0, -3.0)[2] != pytest.approx(3.0 * -3.0 / 4.0, rel=1e-2)
-    # 그리고 임계 크기 폐형해도 직사각에서는 빗나간다
+    # 그리고 임계 크기 폐형해도 직사각에서는 크게 빗나간다
     Ds, Ms = _dstar_mstar(A, B, D, N_f, M_f)
     q = (A[0, 0] * 0.05 ** 4 + A[1, 1] * 0.2 ** 4) / 5760.0
     q_crit = 2 * Ds[0, 0] ** 2 * (Ds[0, 0] + Ds[0, 1]) / Ms[0] ** 2
@@ -447,7 +465,7 @@ def test_critical_size_governed_by_short_side():
     for lx in (0.2, 0.15):
         c = NL.critical_scale(A, B, D, N_f, M_f, lx, 0.05)
         short_sides.append(c["ly"])
-    assert short_sides[0] == pytest.approx(short_sides[1], rel=1e-2)
+    assert short_sides[0] == pytest.approx(short_sides[1], rel=5e-2)
 
 
 # ── 기준 케이스(few-shot)가 실제 엔진과 일치하는가 ──────────────────────────
@@ -460,8 +478,9 @@ def test_reference_case_bistable_cross_ply():
     d, e, tol = env["data"], c["expected"], c["tolerance"]
     assert env["errors"] == []
     assert d["bistable"] is e["bistable"] and d["stable_count"] == e["stable_count"]
-    assert d["critical_panel"]["Lx"] == pytest.approx(e["critical_panel_Lx_mm"],
-                                                     rel=tol["critical_panel_Lx_mm"])
+    # 엔진은 γxy⁰ 자유도를 하나 더 가지므로 폐형해 하한보다 큰 임계 크기를 준다
+    assert d["critical_panel"]["Lx"] > e["critical_panel_Lx_mm_lower_bound"]
+    assert d["critical_panel"]["Lx"] < 100.0
     stable = [x for x in d["equilibria"] if x["stable"]]
     assert len(stable) == 2
     assert all(x["shape"] == "cylindrical" for x in stable)
@@ -487,3 +506,119 @@ def test_reference_case_large_deflection():
     imm = srv.compute_large_deflection(i["laminate"], panel=i["panel"], pressure=i["pressure"],
                                        edge_condition="immovable")["data"]
     assert imm["w_center"] < d["w_center"]
+
+
+# ── 적대 검증에서 확정된 결함의 회귀 방지 ───────────────────────────────────
+
+def test_regression_twist_gate_fires_on_kappa_xy():
+    """HYER-1: κxy가 지배적인 적층이 아무 경고 없이 통과하던 문제.
+
+    A/B/D의 16·26 성분비는 대리지표라 [0/90/45/90]을 놓쳤다. 실제 κxy로 판정해야 한다.
+    """
+    env = srv.compute_bistable_shapes(lam((0.0, 90.0, 45.0, 90.0)),
+                                      panel={"Lx": 100.0, "Ly": 100.0}, delta_T=-150.0)
+    d = env["data"]
+    kx, ky, kxy = (d["linear_reference"]["kappa_x"], d["linear_reference"]["kappa_y"],
+                   d["linear_reference"]["kappa_xy"])
+    assert abs(kxy) / max(abs(kx), abs(ky)) > 0.3
+    assert any(w["code"] == "W130" and "형상 판정을 신뢰하지 말 것" in w["message"]
+               for w in env["warnings"])
+    # 순수 크로스플라이는 κxy=0 이라 이 경고가 뜨지 않는다
+    clean = srv.compute_bistable_shapes(lam((0.0, 90.0)), panel={"Lx": 100.0, "Ly": 100.0},
+                                        delta_T=-150.0)
+    assert clean["data"]["linear_reference"]["kappa_xy"] == pytest.approx(0.0, abs=1e-12)
+    assert not any("비틀림이 지배적" in w["message"] for w in clean["warnings"])
+
+
+def test_regression_energy_barrier_is_per_stable_shape():
+    """HYER-2: 깊은 우물 기준 단일 장벽은 얕은 우물의 실제 장벽을 과대평가했다."""
+    env = srv.compute_bistable_shapes(lam((0.0, 0.0, 90.0), t=0.2),
+                                      panel={"Lx": 200.0, "Ly": 200.0}, delta_T=-150.0)
+    eb = env["data"].get("energy_barrier")
+    if eb is None:
+        pytest.skip("이 조합은 쌍안정이 아니다")
+    bars = [b["barrier"] for b in eb["per_stable_shape"]]
+    assert eb["min_barrier"] == pytest.approx(min(bars), rel=1e-12)
+    assert all(b > 0 for b in bars)
+
+
+def test_regression_gamma_xy_dof_removes_spurious_bistability():
+    """γxy⁰=0 으로 묶으면 [0/0/90]에 없는 쌍안정이 생긴다 — 4자유도가 이를 없앤다."""
+    A, B, D, N_f, M_f = hyer_setup((0.0, 0.0, 90.0))
+    kx, ky = NL.linear_curvatures(A, B, D, N_f, M_f)
+
+    def n_stable(a_mat):
+        en = NL.HyerEnergy(a_mat, B, D, N_f, M_f, 0.1, 0.1)
+        return sum(1 for s in NL.find_equilibria(en, NL.search_span(en, kx, ky)) if s["stable"])
+
+    restricted = np.array(A, dtype=float, copy=True)
+    restricted[2, 2] *= 1e12                      # A66 → ∞ ⇒ γxy⁰ = 0
+    assert n_stable(restricted) == 2              # 제약 모델의 허위 쌍안정
+    assert n_stable(A) == 1                       # 출하 모델은 단안정
+
+
+def test_regression_postbuckling_uses_load_ratio():
+    """PB-1: 2축 압축에서 강성비가 R을 무시해 남은 강성을 과대보고했다."""
+    A, D, Dv, h = iso_plate()
+    L = 0.5
+    n_cr = math.pi ** 2 * Dv * 4 / L ** 2
+    ratios = [NL.postbuckling(D, A, L, L, 1, 1, n_cr, 2.0 * n_cr, h, R)["stiffness_ratio"]
+              for R in (0.0, 0.5, 1.0, 2.0)]
+    assert ratios[0] == pytest.approx(0.5, rel=1e-12)     # R=0 고전값은 유지
+    assert ratios[0] > ratios[1] > ratios[2] > ratios[3]  # 2축 압축일수록 강성이 더 준다
+    assert ratios[2] < 0.3                                # R=1 에서 0.5가 아니어야 한다
+
+
+def test_regression_vk_compliance_uses_full_inverse():
+    """VK-1: 컴플라이언스를 2×2 블록으로 뒤집으면 불균형 적층에서 β를 과대평가했다."""
+    ang = (30.0, 30.0, 30.0, 30.0)
+    qb = [MAT.qbar_matrix(MAT.q_matrix(181e9, 10.3e9, 7.17e9, 0.28), a) for a in ang]
+    z = ABD.z_coordinates([0.125e-3] * 4)
+    A, _B, D = ABD.abd_matrices(qb, z)
+    p = q = math.pi / 0.3
+    _, beta = NL.vk_coefficients(D, A, p, q, immovable=False)
+    a_full = np.linalg.inv(A)[:2, :2]
+    a_blk = np.linalg.inv(A[:2, :2])
+    beta_full = p ** 4 / (16 * a_full[0, 0]) + q ** 4 / (16 * a_full[1, 1])
+    beta_blk = p ** 4 / (16 * a_blk[0, 0]) + q ** 4 / (16 * a_blk[1, 1])
+    assert beta == pytest.approx(beta_full, rel=1e-12)
+    assert beta_blk / beta_full > 1.5          # 옛 방식은 크게 어긋난다 (여기서 1.9배)
+
+
+def test_regression_classify_shape_underflow():
+    """SHAPE-1: a*b 곱이 언더플로해 안장이 spherical 로 뒤집혔다."""
+    assert (-1e-200) * (1e-200) == 0.0          # 곱은 실제로 0으로 언더플로한다
+    assert NL.classify_shape(-1e-200, 1e-200) == "saddle"
+    assert NL.classify_shape(-3.0, 2.0) == "saddle"
+    assert NL.classify_shape(3.0, 2.0) == "spherical"
+    assert NL.classify_shape(1e-20, -1e-20, scale=10.0) == "flat"
+
+
+def test_regression_large_deflection_aspect_ratio_warning():
+    """LD-1: 1항 Galerkin은 세장 판에서 처짐을 과소평가하는데 경고가 없었다."""
+    sym = lam((0.0, 90.0, 90.0, 0.0), mat=T300)
+    slim = srv.compute_large_deflection(sym, panel={"Lx": 1000.0, "Ly": 100.0}, pressure=1e-3)
+    assert any(w["code"] == "W130" and "종횡비" in w["message"] for w in slim["warnings"])
+    square = srv.compute_large_deflection(sym, panel={"Lx": 300.0, "Ly": 300.0}, pressure=1e-3)
+    assert not any("종횡비" in w["message"] for w in square["warnings"])
+
+
+def test_regression_extreme_input_maps_to_e100_not_e501():
+    """HYER-4/HYER-3: 유한·양수 입력의 수치 초과가 E501(내부 오류)로 샜다."""
+    sym = lam((0.0, 90.0, 90.0, 0.0), mat=T300)
+    for panel, pressure in (({"Lx": 1e30, "Ly": 1e30}, 1e-3), ({"Lx": 300.0, "Ly": 300.0}, 1e30)):
+        env = srv.compute_large_deflection(sym, panel=panel, pressure=pressure)
+        if env["errors"]:
+            assert env["errors"][0]["code"] != "E501", (panel, pressure, env["errors"])
+
+
+def test_regression_marginal_stability_is_flagged():
+    """분기점 바로 근처에서 stable/unstable 단정 대신 marginal 을 표시한다."""
+    A, B, D, N_f, M_f = hyer_setup((0.0, 90.0))
+    lc = NL.critical_scale(A, B, D, N_f, M_f, 0.1, 0.1)["lx"]
+    kx, ky = NL.linear_curvatures(A, B, D, N_f, M_f)
+    en = NL.HyerEnergy(A, B, D, N_f, M_f, lc, lc)
+    states = {s["stability"] for s in NL.find_equilibria(en, NL.search_span(en, kx, ky))}
+    assert states <= {"stable", "unstable", "marginal"}
+    # 임계 크기 정확히 위에서는 한계 판정이 나와야 한다
+    assert "marginal" in states

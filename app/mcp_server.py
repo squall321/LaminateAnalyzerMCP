@@ -465,6 +465,29 @@ def assess_partial_composite_bending(laminate: dict, span: float,
 
 
 @mcp.tool()
+def solve_prescribed_curvature(laminate: dict, kappa: list | None = None,
+                               bend_radius: float | None = None, bend_axis: str = "x",
+                               width: str = "free", epsilon0: list | None = None,
+                               loads: dict | None = None) -> dict:
+    """**변위 제어** — 곡률·굽힘반경을 지정한다. 폴더블·롤투롤·맨드릴 굽힘의 실제 구속이다.
+
+    다른 도구는 전부 힘 제어(N/M)라 에이전트가 M = D·κ 지름길을 쓰게 되는데, 비대칭
+    스택에서 실측 **+244.8% 과대**다. 이 도구는 K[ε⁰;κ]=[N;M] 를 지정/미지 자유도로
+    분할해 정확히 푼다.
+    bend_radius(굽힘반경, 길이 단위) + bend_axis("x"|"y") 또는 kappa=[κx,κy,κxy]
+    (자유 성분은 null). epsilon0 로 면내변형도 지정할 수 있다. loads 는 자유 자유도의 힘.
+    **width 가 중요하다**: "free"(M_y=0, 자유 폭 — 기본) vs "constrained"(κ_y=0, 구속 폭).
+    두 경우 답이 다르다(실측 9.6% 차이) — 실제 지그가 어느 쪽인지 확인할 것.
+    반환: 완전한 ε⁰·κ, **equivalent_loads**(recover_ply_stresses 에 그대로 넘겨 파손 판정까지
+    이어진다), surface_strain(assess_crack_shielding 의 applied_strain 에 넣을 값 — 손으로
+    (z−z_ns)/R 을 계산하지 말 것), ply별 재료축 변형률, 그리고 지름길 M=D·κ 와의 대조.
+    """
+    return _guarded(PIPE.run_prescribed_curvature, laminate, kappa=kappa,
+                    bend_radius=bend_radius, bend_axis=bend_axis, width=width,
+                    epsilon0=epsilon0, loads=loads)
+
+
+@mcp.tool()
 def get_reference_cases(case_id: str | None = None) -> dict:
     """내장 기준 케이스를 반환한다. case_id 생략 시 목록.
 

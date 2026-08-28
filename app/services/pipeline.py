@@ -2915,3 +2915,172 @@ def run_partial_composite(payload, span, core_ply=None, include_debug: bool = Fa
                          "d² 는 EI_full − EI_layered 항등식에서 역산해 두 값과 항상 정합한다",
                          *_source_assumptions(si),
                      ], include_debug=include_debug, t0=t0)
+
+
+def run_prescribed_curvature(payload, kappa=None, bend_radius=None, bend_axis: str = "x",
+                             width: str = "free", epsilon0=None, loads=None,
+                             include_debug: bool = False) -> dict:
+    """변위 제어 — 곡률·면내변형 지정 (solve_prescribed_curvature, §19.14)."""
+    from app.solver import prescribed as PRE
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+
+    def _vec3(v, label, dimensionless):
+        """길이 3 리스트(None 허용) → SI 변환. (값, 오류)."""
+        if v is None:
+            return None, None
+        if not (isinstance(v, list) and len(v) == 3):
+            return None, item("E100", field=label, detail=f"{label}는 길이 3 리스트여야 합니다 "
+                                                          f"(자유 성분은 null)")
+        out = []
+        for x in v:
+            if x is None:
+                out.append(None)
+            elif isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x):
+                out.append(float(x) * (1.0 if dimensionless else units.TO_SI[si.unit_system]["kappa"]))
+            else:
+                return None, item("E100", field=label,
+                                  detail=f"{label}의 각 성분은 숫자 또는 null 이어야 합니다")
+        return out, None
+
+    err = None
+    if bend_axis not in ("x", "y"):
+        err = item("E100", field="bend_axis", detail="bend_axis는 'x' 또는 'y' 여야 합니다")
+    elif width not in ("free", "constrained"):
+        err = item("E100", field="width",
+                   detail="width는 'free'(M_y=0, 자유 폭) 또는 'constrained'(κ_y=0, 구속 폭) "
+                          "여야 합니다 — 두 경우 답이 다릅니다(실측 9.6% 차이)")
+    elif kappa is not None and bend_radius is not None:
+        err = item("E100", field="kappa/bend_radius",
+                   detail="kappa 와 bend_radius 를 동시에 줄 수 없습니다")
+    elif bend_radius is not None and not (_num_ok(bend_radius)):
+        err = item("E100", field="bend_radius", detail="bend_radius는 유한한 양수여야 합니다")
+    if err is not None:
+        return ENV.build(data=None, errors=[err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    kap_si, err = _vec3(kappa, "kappa", dimensionless=False)
+    if err is None:
+        eps_si, err = _vec3(epsilon0, "epsilon0", dimensionless=True)
+    if err is not None:
+        return ENV.build(data=None, errors=[err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    if bend_radius is not None:
+        # 1/R 은 길이의 역수 — kappa 와 같은 차원이라 같은 계수로 변환한다
+        k_val = 1.0 / (float(bend_radius) * units.TO_SI[si.unit_system]["length"])
+        other = 0.0 if width == "constrained" else None
+        kap_si = [k_val, other, None] if bend_axis == "x" else [other, k_val, None]
+
+    if kap_si is None and eps_si is None:
+        return ENV.build(data=None, errors=[item("E100", field="kappa/bend_radius/epsilon0",
+                                                 detail="지정할 자유도가 없습니다 — kappa, bend_radius, "
+                                                        "epsilon0 중 최소 하나는 주어야 합니다. "
+                                                        "전부 힘 제어라면 solve_load_response 를 쓰세요")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    N_si, M_si, load_err = _loads_to_si(loads, si.unit_system) if loads is not None else (
+        np.zeros(3), np.zeros(3), None)
+    if load_err is not None:
+        return ENV.build(data=None, errors=[load_err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    A, B, D, z, h = _abd_of_plies(si.plies)
+    K = np.block([[A, B], [B, D]])
+    presc = PRE.build_prescription(kap_si, eps_si)
+    try:
+        x, f_gen = PRE.partitioned_solve(K, presc, np.concatenate([N_si, M_si]))
+    except PRE.SingularPartition as exc:
+        return ENV.build(data=None, errors=[item("E400", field="laminate", detail=str(exc))],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    eps_res, kap_res = x[:3], x[3:]
+    n_res, m_res = f_gen[:3], f_gen[3:]
+    fu = units.FROM_SI[si.unit_system]
+    naive = PRE.naive_moment(D, kap_res)
+
+    qbars = [MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
+             for p_ in si.plies]
+    from app.solver import failure as FAIL
+    per_ply = []
+    for k, p_ in enumerate(si.plies):
+        z_lo, z_hi = float(z[k]), float(z[k + 1])
+        row = {"ply": k, "angle_deg": p_.angle_deg}
+        for label, zv in (("bottom", z_lo), ("mid", 0.5 * (z_lo + z_hi)), ("top", z_hi)):
+            e_xyz = eps_res + zv * kap_res
+            e12 = FAIL.stress_to_material_axes(np.array([e_xyz[0], e_xyz[1], 0.5 * e_xyz[2]]),
+                                               p_.angle_deg)
+            row[label] = {"epsilon_xyz": e_xyz.tolist(),
+                          "epsilon_1": float(e12[0]), "epsilon_2": float(e12[1])}
+        per_ply.append(row)
+    trunc = None
+    if len(per_ply) > config.SUMMARY_PLY_LIMIT:
+        per_ply = per_ply[:config.SUMMARY_TOP_N]
+        trunc = (f"ply {len(si.plies)}개 중 {len(per_ply)}개만 반환 (§6.6 토큰 예산)")
+
+    fixed_names = [n for n, v in zip(("eps_x", "eps_y", "gamma_xy", "kappa_x", "kappa_y",
+                                      "kappa_xy"), presc) if v is not None]
+    data = {
+        "prescribed_dof": fixed_names,
+        "free_dof": [n for n in ("eps_x", "eps_y", "gamma_xy", "kappa_x", "kappa_y", "kappa_xy")
+                     if n not in fixed_names],
+        "response": {"epsilon0": eps_res.tolist(), "kappa": (kap_res * fu["kappa"]).tolist()},
+        "equivalent_loads": {"N": (n_res * fu["A"]).tolist(), "M": (m_res * fu["load_m"]).tolist(),
+                             "chain": "이 N·M 을 recover_ply_stresses·run_progressive_failure 에 "
+                                      "그대로 넘기면 파손 판정까지 이어진다"},
+        "naive_D_kappa": {
+            "M": (naive * fu["load_m"]).tolist(),
+            "overprediction_Mx": (float(naive[0] / m_res[0]) if abs(m_res[0]) > 0 else None),
+            "note": "에이전트가 흔히 쓰는 지름길 M = D·κ 와의 대조. 비대칭 적층이나 자유 폭에서는 "
+                    "크게 틀린다(실측 +244.8%)",
+        },
+        "surface_strain": {
+            "bottom": (eps_res + float(z[0]) * kap_res).tolist(),
+            "top": (eps_res + float(z[-1]) * kap_res).tolist(),
+            "note": "assess_crack_shielding 의 applied_strain 에 넣을 값 — 손으로 (z−z_ns)/R 을 "
+                    "계산하지 말 것",
+        },
+        "per_ply_strain": per_ply,
+        **({"truncation": trunc} if trunc else {}),
+        "definition": ("K[ε⁰;κ] = [N;M] 의 지정/미지 자유도 분할. 지정된 자유도는 일반변형률이 "
+                       "알려지고 대응 일반력이 반력이 된다. 대칭 적층에서 κ 를 전부 지정하면 "
+                       "M = D·κ 로, 비대칭이면 M = D*·κ 로 정확히 환원된다"),
+    }
+
+    warn = list(warnings)
+    over = data["naive_D_kappa"]["overprediction_Mx"]
+    if over is not None and abs(over - 1.0) > 0.05:
+        warn.append(item("W130", field="naive_D_kappa",
+                         detail=f"지름길 M = D·κ 는 이 조합에서 M_x 를 {over:.3g}배로 준다 — "
+                                f"{100 * (over - 1):+.0f}% 어긋난다. 변위 제어를 힘 제어로 바꿔 "
+                                f"암산하지 말 것"))
+    if bend_radius is not None and width == "free":
+        warn.append(item("W130", field="width",
+                         detail="자유 폭(M_y=0) 가정이다 — 폭이 구속된 실제 지그라면 "
+                                "width='constrained' 로 다시 보라. 실측 9.6% 차이가 났다"))
+    A_hat, B_hat, _Dh, _Kh = ABD.normalized_stiffness(A, B, D, h)
+    if float(np.linalg.norm(B_hat)) > 1e-6 * float(np.linalg.norm(A_hat)):
+        warn.append(item("W130", field="laminate",
+                         detail="비대칭 적층 — 곡률을 지정하면 막변형이 함께 생긴다(εx≠0). "
+                                "equivalent_loads 의 N 이 0이 아니면 그 축력을 지그가 실제로 "
+                                "받아줄 수 있는지 확인할 것"))
+
+    hash_payload = {"laminate": payload, "kappa": kappa, "bend_radius": bend_radius,
+                    "bend_axis": bend_axis, "width": width, "epsilon0": epsilon0, "loads": loads}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
+                         payload=hash_payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     unit_system=si.unit_system,
+                     assumptions_extra=[
+                         "변위 제어 — 지정 자유도의 일반력은 지그가 제공하는 반력이다",
+                         "자유 폭(M_y=0)과 구속 폭(κ_y=0)은 다른 문제다 — width 로 명시한다",
+                         *_source_assumptions(si),
+                     ], include_debug=include_debug, t0=t0)

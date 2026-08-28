@@ -342,3 +342,15 @@ y변 단순-단순). SS/CC/CS 조합 9종. `"simply_supported"`·`"clamped"` 별
   때문이다 — 근사값을 내주지 않는다. 자유변이 있는 패널은 FE 로 보내라.
 - `panel` 에 경계조건을 넣으면 E100 이다. 반드시 `boundary` 인자로 준다.
 
+## 18. 변위 제어 (v0.15.0) — 굽힘반경을 주고 싶을 때
+
+`solve_prescribed_curvature(laminate, bend_radius=..., width=...)` — 폴더블·롤투롤·맨드릴
+굽힘의 실제 구속이다. **M = D·κ 로 암산하지 말 것**: 비대칭 스택 R=5mm 에서 실측 **+244.8% 과대**다.
+
+- **`width` 를 반드시 정하라.** `"free"`(M_y=0, 반곡률 생김) vs `"constrained"`(κ_y=0, 폭 반력).
+  실측 9.6% 차이다. 실제 지그가 폭을 잡는지 확인할 것.
+- `equivalent_loads` 의 N·M 을 `recover_ply_stresses` 에 그대로 넘기면 파손 판정까지 이어진다.
+- `surface_strain` 이 `assess_crack_shielding` 의 `applied_strain` 이다 — (z−z_ns)/R 을 손으로
+  계산하지 말 것.
+- `naive_D_kappa.overprediction_Mx` 가 지름길의 오차 배수다. 1에서 멀면 W130 이 뜬다.
+

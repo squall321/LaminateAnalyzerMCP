@@ -75,6 +75,8 @@
 - [x] ~~임의 경계조건 Ritz~~ — v0.14.0 boundary 4글자 코드(S·C 조합 9종). SSSS 는 Navier
       정해로 환원(rel 1e-12), q=λ⁴ 항등식으로 수치적분 독립 검증. 자유변은 강체 모드를
       놓쳐 6.4배 비보수라 E100 거부. 상계 오차 CCCC +6.6% / SSCC +11.6% 를 W130 에 명시
+- [x] ~~변위 제어(곡률 지정)~~ — v0.15.0 solve_prescribed_curvature. 자유도 분할 풀이로
+      대칭→D·κ, 비대칭→D*·κ 정확 환원. 자유/구속 폭 9.6% 차이. 지름길 M=D·κ 는 +244.8% 과대
 - [ ] (보류) 채널링 g(α,β) 보정표 — 수기 이식 리스크로 미탑재 유지 (계획서 §17.7.3)
 - [x] ~~기하 비선형 (V3)~~ — v0.8.0: compute_bistable_shapes(Hyer 쌍안정·임계 판 크기)
       + compute_large_deflection(von Karman, movable/immovable) + compute_postbuckling

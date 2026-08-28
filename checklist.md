@@ -82,6 +82,10 @@
       failure_load 를 되걸면 R=1 검산
 - [x] ~~필요 두께 배율~~ — v0.16.0 solve_required_thickness_scale. N_cr ∝ s³ 전 자리 일치,
       목표 4종에 대해 실제 여유 rel 1e-9 검산
+- [x] ~~샌드위치 국부 파손~~ — v0.17.0 assess_sandwich_local_failure (주름·딤플링·코어 전단).
+      k 계수 폭 0.5~0.825 를 범위로 노출. R_s 경고가 이 도구를 지목하도록 연결
+- [x] ~~하중 스펙트럼 Miner~~ — v0.17.0 estimate_spectrum_life. 블록별 지배 성분·임계 ply 가
+      갈리는 것을 경고로 노출(손합산이 틀리는 이유)
 - [ ] (유보) 전단 좌굴 Nxy — 1항 Ritz 로는 정직하게 못 푼다. 다항 Ritz 커널 이후
 - [ ] (보류) 채널링 g(α,β) 보정표 — 수기 이식 리스크로 미탑재 유지 (계획서 §17.7.3)
 - [x] ~~기하 비선형 (V3)~~ — v0.8.0: compute_bistable_shapes(Hyer 쌍안정·임계 판 크기)

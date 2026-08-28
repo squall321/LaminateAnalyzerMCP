@@ -523,6 +523,42 @@ def solve_required_thickness_scale(laminate: dict, panel: dict, applied_Nx: floa
 
 
 @mcp.tool()
+def assess_sandwich_local_failure(laminate: dict, core: dict, applied: dict | None = None,
+                                  shear: dict | None = None,
+                                  core_ply: int | None = None) -> dict:
+    """샌드위치 국부 파손 — 면재 강도가 통과해도 여기서 먼저 걸린다.
+
+    compute_natural_frequencies·compute_buckling 이 R_s>0.02 로 "샌드위치는 CLT 밖"이라고
+    경고해 왔지만 지목할 도구가 없었다. 세 모드를 대수식으로 판정한다:
+    ① 면재 주름 Hoff–Mautner σ_wr = k(E_f·E_z·G_c)^(1/3) — **k 가 문헌마다 0.5~0.825 로
+    갈려 1.65배 차이난다. 단일값을 내지 않고 범위로 준다**(보수값으로 판정할 것).
+    ② 셀 내 딤플링 σ_d = 2E_f/(1−ν²)(t_f/s)² (cell_size 주면).
+    ③ 코어 전단 τ_c = V/d (shear={"Vx"} 주면).
+    core = {"Ez": 두께방향 압축탄성계수, "Gc": 코어 전단탄성계수, "cell_size"?, "shear_strength"?}.
+    **허니콤은 면내 E 와 두께방향 E_z 가 크게 달라 ply 물성으로 대체할 수 없다** — 따로 받는다.
+    applied = {"N","M"} 을 주면 면재 최대 압축응력 대비 여유와 **governing 모드**를 준다.
+    실측: CFRP 1mm 면재 + 노멕스 코어에서 주름 376 MPa 가 재료 압축강도 600 MPa 보다 먼저 온다.
+    """
+    return _guarded(PIPE.run_sandwich_local, laminate, core=core, applied=applied,
+                    shear=shear, core_ply=core_ply)
+
+
+@mcp.tool()
+def estimate_spectrum_life(laminate: dict, blocks: list, delta_T: float | None = None) -> dict:
+    """변진폭 하중 스펙트럼 — Miner 누적손상. 손으로 Σn/N 을 합산하지 말 것.
+
+    estimate_fatigue_life 는 등진폭 단일 블록만 받는다. 블록마다 지배 성분이 다르면
+    (열사이클 σ2, 진동 τ12) 손합산은 ply·성분 정합을 놓쳐 틀린다.
+    blocks = [{"loads_max": {"N":…,"M":…}, "loads_min"?: …, "cycles": >0, "name"?: …}, …].
+    delta_T 를 주면 모든 블록에 경화 냉각 잔류를 반영한다(§19.10 — 평균응력 이동).
+    반환: 블록별 손상·임계 ply·지배 성분, **total_damage**(D=Σn/N),
+    **repeats_to_failure**(1/D — 이 스펙트럼을 몇 번 반복하면 파손하는가), ply별 손상 분해.
+    한계: Miner 는 하중 **순서를 무시**한다 — 자릿수 판단용이다(W130).
+    """
+    return _guarded(PIPE.run_load_spectrum, laminate, blocks=blocks, delta_t=delta_T)
+
+
+@mcp.tool()
 def get_reference_cases(case_id: str | None = None) -> dict:
     """내장 기준 케이스를 반환한다. case_id 생략 시 목록.
 

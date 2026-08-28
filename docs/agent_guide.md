@@ -370,3 +370,19 @@ s = (target/current)^(1/3) 다. `compute_buckling` 을 이분법으로 반복 �
 탄성 가정 이탈을 판정한다. 실측 Cu/FR-4/Cu PCB 에 Nx=60 N/mm 에서 **항복강도의 2.19배**.
 `yielding` 블록이 나오면 응력·곡률·잔류가 모두 과대평가이니 그대로 보고하지 말 것.
 
+## 20. 샌드위치와 스펙트럼 (v0.17.0)
+
+**`assess_sandwich_local_failure(laminate, core, applied?, shear?)`** —
+`compute_natural_frequencies`·`compute_buckling` 의 `R_s > 0.02` 경고가 이제 이 도구를 지목한다.
+실측 CFRP/노멕스에서 **재료 강도 여유 4.0 인데 코어 전단 1.58 이 지배**했다.
+- `core = {"Ez", "Gc", "cell_size"?, "shear_strength"?}` — 허니콤은 면내 E 와 E_z 가 크게
+  달라 ply 물성으로 대체할 수 없다. 반드시 따로 준다.
+- **주름 계수 k 는 0.5~0.825 로 갈린다(1.65배).** `sigma_conservative` 로 판정하고
+  범위를 사용자에게 함께 전할 것.
+- `governing.mode` 가 `face_material` 이 아니면 CLT 파손 판정만으로 안전을 보고하지 말 것.
+
+**`estimate_spectrum_life(laminate, blocks, delta_T?)`** — 변진폭 스펙트럼을 손으로 합산하지 말 것.
+블록마다 지배 성분(σ2 vs τ12)과 임계 ply 가 다르면 손합산은 정합을 놓쳐 틀린다.
+`total_damage`(D)와 `repeats_to_failure`(1/D)가 헤드라인이다.
+Miner 는 **순서를 무시**하므로 자릿수 판단용이다.
+

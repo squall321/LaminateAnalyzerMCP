@@ -1425,7 +1425,9 @@ def _shear_flexibility(si, D_use, a, b, m, n, warnings, unit_system) -> dict | N
         warnings.append(item("W130", field="transverse_shear",
                              detail=f"횡전단 유연성 R_s = {rs:.3g} (>0.02, 임계모드 m={m},n={n}) — "
                                     f"CLT 진동수·좌굴이 {100*(1-1/np.sqrt(1+rs)):.0f}% 이상 "
-                                    f"비보수적일 수 있습니다 (두꺼운 판·샌드위치 코어)"))
+                                    f"비보수적일 수 있습니다 (두꺼운 판·샌드위치 코어). "
+                                    f"샌드위치라면 assess_sandwich_local_failure 로 면재 주름·"
+                                    f"셀 딤플링·코어 전단을 함께 확인할 것"))
     if assumed:
         warnings.append(item("W120", field="material.G13/G23",
                              detail="G13/G23 미지정 — 면내 G12로 근사했습니다 "
@@ -3336,5 +3338,297 @@ def run_required_scale(payload, panel, applied_Nx, target_margin: float = 1.0,
     return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
                      unit_system=si.unit_system,
                      assumptions_extra=["균일 두께 배율 가정 — 물성·적층각·판 크기는 그대로",
+                                        *_source_assumptions(si)],
+                     include_debug=include_debug, t0=t0)
+
+
+def run_sandwich_local(payload, core, applied=None, shear=None, core_ply=None,
+                       include_debug: bool = False) -> dict:
+    """샌드위치 국부 파손 (assess_sandwich_local_failure, §19.19)."""
+    from app.solver import partial_composite as PC
+    from app.solver import sandwich as SW
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    n = len(si.plies)
+    fm = units.TO_SI[si.unit_system]["modulus"]
+    fl = units.TO_SI[si.unit_system]["length"]
+    err = None
+    if n < 3:
+        err = item("E100", field="laminae", detail="샌드위치는 면재-코어-면재 3층 이상이어야 합니다")
+    elif not isinstance(core, dict):
+        err = item("E100", field="core",
+                   detail="core는 {\"Ez\": >0, \"Gc\": >0, \"cell_size\"?: >0, "
+                          "\"shear_strength\"?: >0} 이어야 합니다")
+    else:
+        extra = set(core) - {"Ez", "Gc", "cell_size", "shear_strength"}
+        if extra:
+            err = item("E100", field="core",
+                       detail=f"core 에 지원하지 않는 키 {sorted(extra)} 가 있습니다")
+        elif not (_num_ok(core.get("Ez")) and _num_ok(core.get("Gc"))):
+            err = item("E100", field="core",
+                       detail="core.Ez(두께방향 압축탄성계수)와 core.Gc(코어 전단탄성계수)는 "
+                              "양수 필수입니다 — 허니콤은 면내 E 와 크게 다르므로 ply 물성으로 "
+                              "대체할 수 없습니다")
+        elif any(k in core and not _num_ok(core[k]) for k in ("cell_size", "shear_strength")):
+            err = item("E100", field="core", detail="cell_size·shear_strength 는 양수여야 합니다")
+    if err is None and core_ply is not None and (
+            not isinstance(core_ply, int) or isinstance(core_ply, bool) or not (0 < core_ply < n - 1)):
+        err = item("E100", field="core_ply", detail=f"core_ply는 1..{n - 2} 정수여야 합니다")
+    if err is not None:
+        return ENV.build(data=None, errors=[err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    auto = core_ply is None
+    k_core = PC.detect_compliant_core(si.plies) if auto else int(core_ply)
+    if k_core is None:
+        return ENV.build(data=None, errors=[item("E100", field="core_ply",
+                                                 detail="이웃보다 10배 이상 무른 코어를 찾지 못했습니다 — "
+                                                        "샌드위치가 아니거나 core_ply 로 지정하세요")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    ez, gc = float(core["Ez"]) * fm, float(core["Gc"]) * fm
+    cell = float(core["cell_size"]) * fl if "cell_size" in core else None
+    tau_allow = float(core["shear_strength"]) * fm if "shear_strength" in core else None
+
+    qbars = [MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
+             for p_ in si.plies]
+    th = list(si.thicknesses)
+    z = ABD.z_coordinates(th)
+    ea1, ei1 = PC.sublaminate_ea_ei(qbars, th, 0, k_core)
+    ea2, ei2 = PC.sublaminate_ea_ei(qbars, th, k_core + 1, n)
+    t1 = float(sum(th[:k_core]))
+    t2 = float(sum(th[k_core + 1:]))
+    ef1, ef2 = ea1 / t1, ea2 / t2                 # 면재 축방향 유효 탄성계수
+    d_faces = 0.5 * (t1 + t2) + th[k_core]        # 면재 중심 거리
+    nu_face = si.plies[0].nu12
+
+    f = units.FROM_SI[si.unit_system]
+    modes: dict[str, dict] = {}
+    lo_k, hi_k = SW.WRINKLING_K_RANGE
+    e_face = min(ef1, ef2)                        # 얇은/무른 면재가 먼저 주름진다
+    wr_lo = SW.face_wrinkling_stress(e_face, ez, gc, lo_k)
+    wr_hi = SW.face_wrinkling_stress(e_face, ez, gc, hi_k)
+    modes["face_wrinkling"] = {
+        "sigma_conservative": wr_lo * f["modulus"], "sigma_optimistic": wr_hi * f["modulus"],
+        "k_range": list(SW.WRINKLING_K_RANGE),
+        "definition": "Hoff–Mautner σ_wr = k(E_f·E_z·G_c)^(1/3). **k 가 문헌마다 0.5~0.825 로 "
+                      "갈린다**(1.65배) — 단일값을 쓰지 말고 보수값으로 판정할 것",
+    }
+    if cell is not None:
+        t_thin = min(t1, t2)
+        sd = SW.intracell_dimpling_stress(e_face, nu_face, t_thin, cell)
+        modes["intracell_dimpling"] = {
+            "sigma": sd * f["modulus"], "cell_size": cell / fl,
+            "definition": "σ_d = 2E_f/(1−ν²)(t_f/s)² — 얇은 면재·큰 셀에서 지배한다",
+        }
+
+    face_stress = None
+    if applied is not None:
+        N_si, M_si, load_err = _loads_to_si(applied, si.unit_system)
+        if load_err is not None:
+            return ENV.build(data=None, errors=[load_err], warnings=warnings, payload=payload,
+                             unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+        A, B, D, _z, _h = _abd_of_plies(si.plies)
+        try:
+            eps0, kappa = RESP.solve_response(A, B, D, N_si, M_si)
+        except RESP.SingularSystemError:
+            return ENV.build(data=None, errors=[item("E400", field="laminate")], warnings=warnings,
+                             payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+        from app.solver import failure as FAIL
+        peak = 0.0
+        peak_ply = None
+        for k in list(range(0, k_core)) + list(range(k_core + 1, n)):
+            for zv in (float(z[k]), float(z[k + 1])):
+                sx = float(FAIL.ply_stresses_at(qbars[k], eps0, kappa, zv)[0])
+                if -sx > peak:                   # 압축만 주름·딤플링을 유발한다
+                    peak, peak_ply = -sx, k
+        face_stress = {"max_compressive": peak * f["modulus"], "ply": peak_ply}
+
+    if shear is not None:
+        if not (isinstance(shear, dict) and set(shear) <= {"Vx", "Vy"}
+                and any(_num_ok(shear.get(k), positive=False) for k in ("Vx", "Vy"))):
+            return ENV.build(data=None, errors=[item("E100", field="shear",
+                                                     detail="shear는 {\"Vx\"?, \"Vy\"?} (단위 폭당 "
+                                                            "횡전단력) 이어야 합니다")],
+                             warnings=warnings, payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+        fv = units.TO_SI[si.unit_system]["load_n"]
+        v_si = max(abs(float(shear.get(k, 0.0))) for k in ("Vx", "Vy")) * fv
+        tau = SW.core_shear_stress(v_si, d_faces)
+        blk = {"tau_core": tau * f["modulus"],
+               "definition": "τ_c = V/d (d = 면재 중심 거리). 코어가 전단을 전부 지탱한다는 표준 근사"}
+        if tau_allow is not None:
+            blk["margin"] = tau_allow / tau if tau > 0 else None
+        modes["core_shear"] = blk
+
+    # 지배 모드 판정 — 면재 압축응력 대비 여유
+    governing = None
+    if face_stress is not None and face_stress["max_compressive"] > 0:
+        s_app = face_stress["max_compressive"]
+        cand = {"face_wrinkling": modes["face_wrinkling"]["sigma_conservative"] / s_app}
+        if "intracell_dimpling" in modes:
+            cand["intracell_dimpling"] = modes["intracell_dimpling"]["sigma"] / s_app
+        strengths = [p_.strength for p_ in si.plies if p_.strength is not None]
+        if strengths:
+            cand["face_material"] = min(s[1] for s in strengths) * f["modulus"] / s_app
+        name = min(cand, key=lambda k: cand[k])
+        governing = {"mode": name, "margin": cand[name], "margins": cand,
+                     "definition": "여유 = 국부 파손 응력 ÷ 면재 최대 압축응력 (보수 k 기준)"}
+        if "core_shear" in modes and modes["core_shear"].get("margin") is not None:
+            governing["margins"]["core_shear"] = modes["core_shear"]["margin"]
+            if modes["core_shear"]["margin"] < governing["margin"]:
+                governing["mode"] = "core_shear"
+                governing["margin"] = modes["core_shear"]["margin"]
+
+    data = {
+        "core_ply": {"index": k_core, "thickness": th[k_core] * f["z"],
+                     "detected": "auto" if auto else "explicit",
+                     "Ez": ez * f["modulus"], "Gc": gc * f["modulus"]},
+        "faces": {"thickness": [t1 * f["z"], t2 * f["z"]],
+                  "E_effective": [ef1 * f["modulus"], ef2 * f["modulus"]],
+                  "center_distance": d_faces * f["z"]},
+        "modes": modes,
+        **({"face_stress": face_stress} if face_stress else {}),
+        **({"governing": governing} if governing else {}),
+        "meaning": ("국부 파손은 **면재 재료강도와 무관하게 먼저 올 수 있다** — CLT 기반 "
+                    "파손 판정이 통과해도 여기서 걸릴 수 있다"),
+    }
+
+    warn = list(warnings)
+    warn.append(item("W130", field="modes.face_wrinkling",
+                     detail=f"주름 계수 k 가 문헌마다 {lo_k}~{hi_k} 로 갈린다 — 응력이 "
+                            f"{wr_hi / wr_lo:.2f}배 차이난다. **보수값(k={lo_k})으로 판정**하고 "
+                            f"정밀 판정이 필요하면 시험으로 계수를 확정할 것"))
+    if governing is not None and governing["margin"] < 1.0:
+        warn.append(item("W130", field="governing",
+                         detail=f"**{governing['mode']} 여유가 {governing['margin']:.3g} 로 1 미만**이다 — "
+                                f"국부 파손이 이미 일어났다. 면재 강도 판정만으로 안전하다고 "
+                                f"보고하지 말 것"))
+    if "intracell_dimpling" not in modes:
+        warn.append(item("W120", field="core.cell_size",
+                         detail="cell_size 가 없어 셀 내 딤플링을 보지 못했다 — 허니콤 코어라면 "
+                                "얇은 면재에서 이 모드가 지배할 수 있다"))
+    if shear is None:
+        warn.append(item("W120", field="shear",
+                         detail="횡전단력이 없어 코어 전단을 보지 못했다 — 굽힘 하중이 있으면 "
+                                "shear={\"Vx\":…} 로 함께 줄 것"))
+
+    hash_payload = {"laminate": payload, "core": core, "applied": applied, "shear": shear,
+                    "core_ply": core_ply}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
+                         payload=hash_payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     unit_system=si.unit_system,
+                     assumptions_extra=[
+                         "면재는 등가 등방 판으로 보고 코어는 전단만 지탱한다는 표준 샌드위치 근사",
+                         "주름 계수 k 는 문헌 범위를 그대로 노출한다 — 단일값을 만들지 않는다",
+                         *_source_assumptions(si),
+                     ], include_debug=include_debug, t0=t0)
+
+
+def run_load_spectrum(payload, blocks, delta_t=None, include_debug: bool = False) -> dict:
+    """변진폭 하중 스펙트럼 — Miner 선형 누적손상 (estimate_spectrum_life, §19.20).
+
+    estimate_fatigue_life 는 등진폭 단일 블록만 받아 에이전트가 손으로 Σn/N 을 합산하게
+    만든다("암산하지 않는다" 위반). 블록마다 지배 성분이 다르면(열사이클 σ2, 진동 τ12)
+    손합산은 ply·성분 정합을 놓쳐 틀린다.
+    """
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    if not (isinstance(blocks, list) and blocks):
+        return ENV.build(data=None, errors=[item("E100", field="blocks",
+                                                 detail="blocks는 [{\"loads_max\":…, \"loads_min\"?:…, "
+                                                        "\"cycles\": >0, \"name\"?:…}] 목록이어야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    for bi, blk in enumerate(blocks):
+        if not (isinstance(blk, dict) and set(blk) <= {"loads_max", "loads_min", "cycles", "name"}):
+            return ENV.build(data=None, errors=[item("E100", field=f"blocks[{bi}]",
+                                                     detail="블록은 {loads_max, loads_min?, cycles, name?} "
+                                                            "만 허용합니다")],
+                             warnings=warnings, payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+        if not _num_ok(blk.get("cycles")):
+            return ENV.build(data=None, errors=[item("E100", field=f"blocks[{bi}].cycles",
+                                                     detail="cycles는 유한한 양수여야 합니다")],
+                             warnings=warnings, payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+
+    rows, total_damage = [], 0.0
+    per_ply_damage: dict[int, float] = {}
+    for bi, blk in enumerate(blocks):
+        sub = run_fatigue(payload, blk.get("loads_max"), blk.get("loads_min"),
+                          detail="full", delta_t=delta_t)
+        if sub["errors"]:
+            err = dict(sub["errors"][0])
+            err["field"] = f"blocks[{bi}].{err.get('field', 'loads')}"
+            return ENV.build(data=None, errors=[err], warnings=warnings, payload=payload,
+                             unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+        crit = sub["data"]["critical_ply"]
+        n_f = crit["cycles_to_failure"] if crit else None
+        n_i = float(blk["cycles"])
+        d_i = (n_i / n_f) if (n_f and n_f > 0) else 0.0
+        total_damage += d_i
+        if crit:
+            per_ply_damage[crit["ply"]] = per_ply_damage.get(crit["ply"], 0.0) + d_i
+        rows.append({
+            "block": bi, "name": blk.get("name"), "cycles_applied": n_i,
+            "cycles_to_failure": n_f, "damage": d_i,
+            "critical_ply": crit["ply"] if crit else None,
+            "governing_component": crit["governing_component"] if crit else None,
+            "at_cap": bool(crit["at_cap"]) if crit else None,
+        })
+
+    comps = {r["governing_component"] for r in rows if r["governing_component"]}
+    plies_hit = sorted(per_ply_damage)
+    data = {
+        "blocks": rows,
+        "total_damage": total_damage,
+        "repeats_to_failure": (1.0 / total_damage) if total_damage > 0 else None,
+        "damage_by_ply": [{"ply": k, "damage": v,
+                           "fraction": (v / total_damage if total_damage > 0 else None)}
+                          for k, v in sorted(per_ply_damage.items())],
+        "governing_components": sorted(comps),
+        "delta_T": (float(delta_t) if delta_t not in (None, 0.0) else None),
+        "definition": ("Miner 선형 누적손상 D = Σ n_i/N_f,i. **repeats_to_failure = 1/D** 는 "
+                       "이 스펙트럼 전체를 몇 번 반복하면 파손하는가다(D≥1 이면 이미 파손)"),
+    }
+    warn = list(warnings)
+    if total_damage >= 1.0:
+        warn.append(item("W130", field="total_damage",
+                         detail=f"누적손상 D = {total_damage:.3g} ≥ 1 — 이 스펙트럼 한 번으로 "
+                                f"이미 파손이다"))
+    if len(comps) > 1:
+        warn.append(item("W130", field="governing_components",
+                         detail=f"블록마다 지배 성분이 다르다 {sorted(comps)} — 손으로 합산하면 "
+                                f"성분 정합을 놓쳐 틀린다. 이 도구의 존재 이유다"))
+    if len(plies_hit) > 1:
+        warn.append(item("W120", field="damage_by_ply",
+                         detail=f"블록마다 임계 ply 가 다르다 {plies_hit} — Miner 는 ply 별로 누적해야 "
+                                f"엄밀하다. total_damage 는 블록별 최임계를 합한 **보수적** 상한이다"))
+    warn.append(item("W130", field="model",
+                     detail="Miner 는 하중 **순서를 무시**한다(선형 누적). 실제로는 고-저 순서와 "
+                            "저-고 순서의 수명이 다르다 — 자릿수 판단용으로만 쓸 것"))
+    hash_payload = {"laminate": payload, "blocks": blocks, "delta_T": delta_t}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
+                         payload=hash_payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     unit_system=si.unit_system,
+                     assumptions_extra=["Miner 선형 누적손상 — 순서 무관, 상호작용 무시",
+                                        "블록별 수명은 estimate_fatigue_life 와 동일한 경로로 계산",
                                         *_source_assumptions(si)],
                      include_debug=include_debug, t0=t0)

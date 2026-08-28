@@ -443,6 +443,24 @@ def compute_moisture_uptake(laminate: dict, diffusion: dict, time_s: float | Non
 
 
 @mcp.tool()
+def assess_partial_composite_bending(laminate: dict, span: float,
+                                     core_ply: int | None = None) -> dict:
+    """순응 중간층(OCA·PSA)이 끼면 CLT 굽힘강성이 과대평가된다 — 그 배수를 준다.
+
+    CLT 는 모든 층이 **완전합성**으로 함께 굽는다고 가정한다(평면 유지). 폴더블 스택처럼
+    무른 중간층이 있으면 두 면재가 서로 미끄러져 실제 굽힘강성이 훨씬 낮다.
+    shear-lag 폐형해: α² = (G_c/t_c)(1/EA₁+1/EA₂+d²/EI_layered), f = 1 − tanh(αL/2)/(αL/2).
+    **span(굽힘 스팬)이 필수다** — 합성도가 스팬에 강하게 의존한다
+    (실측 UTG/OCA/UTG, OCA G=0.3 MPa: L=1mm 에서 CLT 18.3배 과대, L=10mm 2.03배, L=200mm 1.03배).
+    core_ply 생략 시 이웃보다 10배 이상 무른 중간층을 자동 탐지한다.
+    반환: composite_action f(0=각자 굼, 1=CLT와 동일), EI_layered/EI_full_CLT/EI_effective,
+    **clt_overprediction**(CLT ÷ 실제 — 1보다 크면 처짐·좌굴·진동수가 모두 낙관적).
+    순응층의 G13 이 없으면 G12 로 대체하고 W120 으로 알린다(α ∝ √G_c 라 민감하다).
+    """
+    return _guarded(PIPE.run_partial_composite, laminate, span=span, core_ply=core_ply)
+
+
+@mcp.tool()
 def get_reference_cases(case_id: str | None = None) -> dict:
     """내장 기준 케이스를 반환한다. case_id 생략 시 목록.
 

@@ -1119,6 +1119,7 @@ def run_buckling(payload, panel, load_ratio: float = 0.0, applied_Nx=None,
                          include_debug=include_debug, t0=t0)
 
     D_use, appl, h, _ = _bending_stiffness_for_navier(si, warnings)
+    _compliant_core_gate(si, min(a, b), warnings, "짧은 변")   # §19.12
     if boundary == "clamped":
         res = NAV.scan_ritz_buckling(D_use, a, b, float(load_ratio), boundary,
                                      NAV.CLAMPED_MODE_LIMIT)
@@ -1205,6 +1206,7 @@ def run_frequencies(payload, panel, n_modes: int = 5, boundary: str = "simply_su
                          include_debug=include_debug, t0=t0)
 
     D_use, appl, h, _ = _bending_stiffness_for_navier(si, warnings)
+    _compliant_core_gate(si, min(a, b), warnings, "짧은 변")   # §19.12
     rho_areal = sum(p_.rho * p_.thickness for p_ in si.plies)   # SI kg/m²
     scan = max(NAV.MODE_SCAN, n_modes)      # f는 m·n 단조 증가 → scan ≥ n_modes면 상위 정확 (NAV-3)
     if boundary == "clamped":
@@ -2764,5 +2766,143 @@ def run_moisture_uptake(payload, diffusion, time_s=None, mode: str = "absorption
                      assumptions_extra=[
                          "양면 노출·1D 두께방향 확산, D 상수, 초기 균일 분포 가정",
                          "τ = D·t/h² 가 유일한 지배 변수 — 두께 제곱에 비례해 시간이 늘어난다",
+                         *_source_assumptions(si),
+                     ], include_debug=include_debug, t0=t0)
+
+
+def _compliant_core_gate(si, span_si, warnings, label):
+    """순응 중간층이 있으면 CLT 굽힘강성이 과대평가임을 알린다 (§19.12 게이트)."""
+    from app.solver import partial_composite as PC
+    k = PC.detect_compliant_core(si.plies)
+    if k is None or span_si is None or span_si <= 0:
+        return None
+    qbars = [MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
+             for p_ in si.plies]
+    th = list(si.thicknesses)
+    A, B, D, _z, _h = _abd_of_plies(si.plies)
+    ea1, ei1 = PC.sublaminate_ea_ei(qbars, th, 0, k)
+    ea2, ei2 = PC.sublaminate_ea_ei(qbars, th, k + 1, len(th))
+    _ea_c, ei_c = PC.sublaminate_ea_ei(qbars, th, k, k + 1)
+    core = si.plies[k]
+    g_core = core.g13 if core.g13 is not None else core.G12
+    res = PC.composite_action(ea1, ei1, ea2, ei2, ei_c, float(D[0, 0]),
+                              g_core, core.thickness, span_si)
+    f = res.get("composite_action")
+    if f is None or f >= 0.9:
+        return res
+    over = res["EI_full"] / res["EI_effective"] if res["EI_effective"] > 0 else None
+    warnings.append(item("W130", field="laminae",
+                         detail=f"laminae[{k}] 가 이웃보다 10배 이상 무른 순응층이다 — {label} 기준 "
+                                f"합성도 {f * 100:.1f}% 로 **CLT 굽힘강성이 "
+                                f"{over:.3g}배 과대평가**된다. assess_partial_composite_bending "
+                                f"로 확인할 것"))
+    return res
+
+
+def run_partial_composite(payload, span, core_ply=None, include_debug: bool = False) -> dict:
+    """순응층 부분합성 굽힘 (assess_partial_composite_bending, §19.12)."""
+    from app.solver import partial_composite as PC
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    n = len(si.plies)
+    err = None
+    if n < 3:
+        err = item("E100", field="laminae",
+                   detail="부분합성은 면재-순응층-면재 3층 이상이어야 평가할 수 있습니다")
+    elif not (_num_ok(span)):
+        err = item("E100", field="span",
+                   detail="span(굽힘 스팬, 길이 단위)은 유한한 양수여야 합니다 — 합성도가 스팬에 "
+                          "강하게 의존합니다(실측 L=1mm 18.3배 vs L=200mm 1.03배)")
+    elif core_ply is not None and (not isinstance(core_ply, int) or isinstance(core_ply, bool)
+                                   or not (0 < core_ply < n - 1)):
+        err = item("E100", field="core_ply",
+                   detail=f"core_ply는 1..{n - 2} 정수여야 합니다 (면재 사이의 중간층)")
+    if err is not None:
+        return ENV.build(data=None, errors=[err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    auto = core_ply is None
+    k = PC.detect_compliant_core(si.plies) if auto else int(core_ply)
+    if k is None:
+        return ENV.build(data=None, errors=[item("E100", field="core_ply",
+                                                 detail="이웃보다 10배 이상 무른 중간층을 찾지 못했습니다 — "
+                                                        "순응층이 없으면 CLT 가 이미 맞습니다. "
+                                                        "특정 층을 보려면 core_ply 로 지정하세요")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    span_si = float(span) * units.TO_SI[si.unit_system]["length"]
+    qbars = [MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
+             for p_ in si.plies]
+    th = list(si.thicknesses)
+    A, B, D, _z, h = _abd_of_plies(si.plies)
+    ea1, ei1 = PC.sublaminate_ea_ei(qbars, th, 0, k)
+    ea2, ei2 = PC.sublaminate_ea_ei(qbars, th, k + 1, len(th))
+    _ea_c, ei_c = PC.sublaminate_ea_ei(qbars, th, k, k + 1)
+    core = si.plies[k]
+    g_core = core.g13 if core.g13 is not None else core.G12
+    res = PC.composite_action(ea1, ei1, ea2, ei2, ei_c, float(D[0, 0]),
+                              g_core, core.thickness, span_si)
+    if res.get("composite_action") is None:
+        return ENV.build(data=None, errors=[item("E100", field="laminate",
+                                                 detail=f"부분합성을 계산할 수 없습니다: {res.get('reason')}")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    f = units.FROM_SI[si.unit_system]
+    fac = res["composite_action"]
+    over = res["EI_full"] / res["EI_effective"] if res["EI_effective"] > 0 else None
+    data = {
+        "core_ply": {"index": k, "angle_deg": core.angle_deg,
+                     "thickness": core.thickness * f["z"],
+                     "G_transverse": g_core * f["modulus"],
+                     "detected": "auto" if auto else "explicit",
+                     "G13_assumed_from_G12": core.g13 is None},
+        "span": float(span),
+        "composite_action": fac,
+        "EI_layered": res["EI_layered"] * f["D"],
+        "EI_full_CLT": res["EI_full"] * f["D"],
+        "EI_effective": res["EI_effective"] * f["D"],
+        "clt_overprediction": over,
+        "shear_lag": {"alpha": res["alpha"] / f["z"] if res["alpha"] else None,
+                      "alpha_L": res["alpha_L"],
+                      "face_neutral_axis_distance": res["d"] * f["z"]},
+        "definition": ("α² = (G_c/t_c)(1/EA₁ + 1/EA₂ + d²/EI_layered), "
+                       "f = 1 − tanh(αL/2)/(αL/2), EI_eff = EI_layered + f·(EI_full − EI_layered). "
+                       "f=0 은 면재가 각자 굽는 상태, f=1 은 CLT(완전합성)와 같다"),
+        "meaning": ("clt_overprediction = CLT 굽힘강성 ÷ 실제 유효 굽힘강성. "
+                    "1보다 크면 CLT 를 쓴 처짐·좌굴·진동수가 모두 낙관적이다"),
+    }
+
+    warn = list(warnings)
+    if fac < 0.9:
+        warn.append(item("W130", field="composite_action",
+                         detail=f"합성도 {fac * 100:.1f}% — CLT 기반 도구(solve_load_response, "
+                                f"compute_buckling, compute_natural_frequencies)의 굽힘 관련 값이 "
+                                f"모두 {over:.3g}배 낙관적이다"))
+    if core.g13 is None:
+        warn.append(item("W120", field="core_ply.G_transverse",
+                         detail="순응층에 G13 이 없어 면내 G12 로 대체했다 — 실제 횡전단 강성이 다르면 "
+                                "합성도가 달라진다(α ∝ √G_c). 실측을 넣을 것"))
+    if res["alpha_L"] is not None and res["alpha_L"] < 1.0:
+        warn.append(item("W130", field="shear_lag.alpha_L",
+                         detail=f"αL = {res['alpha_L']:.3g} < 1 — 전단 전달이 거의 일어나지 않는 "
+                                f"영역이다. 면재가 사실상 따로 굽는다"))
+
+    hash_payload = {"laminate": payload, "span": span, "core_ply": core_ply}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
+                         payload=hash_payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     unit_system=si.unit_system,
+                     assumptions_extra=[
+                         "shear-lag 3층 보 모델 — 면재는 오일러 보, 순응층은 전단만 전달(축강성 무시)",
+                         "단순지지 스팬 L 의 균일 굽힘 가정. 경계·하중 형태가 다르면 f 가 달라진다",
+                         "d² 는 EI_full − EI_layered 항등식에서 역산해 두 값과 항상 정합한다",
                          *_source_assumptions(si),
                      ], include_debug=include_debug, t0=t0)

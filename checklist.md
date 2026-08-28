@@ -70,6 +70,8 @@
       G_Ic~G_IIc 범위. Benzeggagh–Kenane. Suo–Hutchinson 위상각은 수치표라 미탑재
 - [x] ~~열잔류 파손·피로 반영~~ — v0.12.0 tsai_wu_with_offset (R 2차식 정해). 진행성 파손은
       단계마다 잔류 재계산, 피로는 평균응력 이동. ΔT=−150K 에서 FPF −81%, 수명 8자릿수 감소
+- [x] ~~순응층 부분합성 굽힘~~ — v0.13.0 assess_partial_composite_bending (shear-lag 폐형해).
+      UTG/OCA/UTG L=10mm 에서 CLT 2.03배 과대. 좌굴·진동수에 교차 게이트
 - [ ] (보류) 채널링 g(α,β) 보정표 — 수기 이식 리스크로 미탑재 유지 (계획서 §17.7.3)
 - [x] ~~기하 비선형 (V3)~~ — v0.8.0: compute_bistable_shapes(Hyer 쌍안정·임계 판 크기)
       + compute_large_deflection(von Karman, movable/immovable) + compute_postbuckling

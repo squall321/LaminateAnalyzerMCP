@@ -313,3 +313,18 @@ CTE 가 있는데 `delta_T` 를 안 주면 W130 이 뜬다 — 그 경고를 무
 - `basis == "unknown"` → 분할에 3D 해석이 필요하다. `onset_strain` 은 **보수적인 Mode I 값**이고
   `onset_strain_range` 가 실제 범위다. 사용자에게 범위로 보고할 것.
 
+## 16. 순응층이 있으면 CLT 굽힘강성을 믿지 말 것 (v0.13.0)
+
+폴더블 스택(UTG/OCA/UTG)처럼 **무른 중간층**이 끼면 두 면재가 서로 미끄러져 실제 굽힘강성이
+CLT 보다 훨씬 낮다. CLT 는 항상 완전합성(f=1)을 가정한다.
+
+`assess_partial_composite_bending(laminate, span, core_ply?)` — **span 이 필수다.**
+실측 UTG/OCA/UTG (OCA G=0.3 MPa): L=1mm 에서 CLT 가 **18.3배**, L=10mm 에서 **2.03배**
+과대평가하고 L=200mm 면 1.03배로 수렴한다. 같은 스택이 스팬에 따라 완전히 다르다.
+
+- `clt_overprediction` 이 헤드라인이다 — CLT 기반 처짐·좌굴·진동수가 모두 그만큼 낙관적이다.
+- `compute_buckling`·`compute_natural_frequencies` 는 짧은 변을 스팬으로 써서 자동으로 W130 을
+  띄운다. 그 경고가 뜨면 굽힘 관련 값을 그대로 보고하지 말 것.
+- `αL < 1` 이면 전단 전달이 거의 없어 면재가 사실상 따로 굽는다.
+- 순응층에 G13 이 없으면 G12 로 대체하고 W120 을 붙인다 — α ∝ √G_c 라 민감하다.
+

@@ -16,7 +16,8 @@ TO_SI = {
 # SI 결과 → 입력 단위계 표시 변환 계수
 FROM_SI = {
     "SI": {"A": 1.0, "B": 1.0, "D": 1.0, "z": 1.0, "hat": 1.0, "areal_mass": 1.0,
-           "modulus": 1.0, "kappa": 1.0, "energy_area": 1.0, "shear_nl": 1.0},
+           "modulus": 1.0, "kappa": 1.0, "energy_area": 1.0, "shear_nl": 1.0,
+           "load_n": 1.0, "load_m": 1.0},
     "SI_mm": {
         "A": 1.0e-3,          # N/m → N/mm
         "B": 1.0,             # N → N (동일 차원)
@@ -28,6 +29,8 @@ FROM_SI = {
         "kappa": 1.0e-3,      # 1/m → 1/mm
         "energy_area": 1.0e-3,  # J/m² → N/mm(=kJ/m²)
         "shear_nl": 1.0e18,   # 1/Pa^3 → 1/MPa^3
+        "load_n": 1.0e-3,     # N/m → N/mm (단위 폭당 힘)
+        "load_m": 1.0,        # N·m/m → N·mm/mm (둘 다 N — 수치 동일)
     },
 }
 

@@ -55,6 +55,9 @@
 - [x] ~~샌드위치/FSDT~~ — v0.6.0 횡전단 유연성 R_s(임계모드 정합) + 에너지등가 A55/A44 + 1차 보정
 - [x] ~~점탄성 감쇠 합성~~ — v0.6.0 모달 η·Q (MSE, 1차 모드·중립면 정합)
 - [x] ~~간이 피로~~ — v0.7.0 estimate_fatigue_life (정규화 FI + Goodman + log_linear/basquin)
+- [x] ~~자유 가장자리 박리~~ — v0.10.0 assess_free_edge_delamination (O'Brien ERR 폐형해 +
+      계면별 지배 구동력 peel/τyz/τxz). 면내 R=1.33 통과 케이스가 가장자리 여유 0.91 로
+      뒤집히는 것을 실측 확인. 도구 26종, 테스트 299
 - [ ] (보류) 채널링 g(α,β) 보정표 — 수기 이식 리스크로 미탑재 유지 (계획서 §17.7.3)
 - [x] ~~기하 비선형 (V3)~~ — v0.8.0: compute_bistable_shapes(Hyer 쌍안정·임계 판 크기)
       + compute_large_deflection(von Karman, movable/immovable) + compute_postbuckling

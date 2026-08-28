@@ -356,6 +356,31 @@ def solve_nonlinear_shear_response(laminate: dict, loads: dict) -> dict:
 
 
 @mcp.tool()
+def assess_free_edge_delamination(laminate: dict, loads: dict,
+                                  fracture: dict | None = None) -> dict:
+    """자유 가장자리 박리 — 면내 강도로는 안전한데 가장자리에서 먼저 뜯기는 경우를 잡는다.
+
+    recover_ply_stresses 가 "여유 있음"이라고 답해도 자유 가장자리에서는 각 ply 의
+    σy·τxy 가 0이 되어야 해서 그 불균형이 층간 응력으로 넘어간다. 그 파손 모드를 보는
+    유일한 도구다(compute_interlaminar_stresses 는 횡전단력 Vx/Vy 가 있어야 하고,
+    순수 면내 인장에서는 0을 돌려준다).
+
+    O'Brien 폐형해: G = (ε_x²·h/2)·(E_LAM − E*). **박리 길이에 무관**하므로 임계 변형률이
+    닫힌 형태로 나온다 — ε_c = √(2·G_c/(h·ΔE)).
+    loads = {"N":[Nx,Ny,Nxy], "M":[...]} (단위 폭당). 축인장이 전제라 M 이 있으면 W130.
+    fracture(선택) = {"G_c": 층간 파괴인성} (SI: J/m², SI_mm: N/mm) — 주면 계면별 개시
+    변형률과 여유율까지, 없으면 G 순위만.
+
+    반환: 계면별 G·ΔE·개시변형률·여유율과 **dominant_driver**
+    (peel=σz 개구 | transverse_shear=τyz | in_plane_shear=τxz | none).
+    [±45] 계열은 σy 가 0이라 전단 지배, [0/90] 계열은 peel 지배로 갈린다.
+    한계: 총 G 만 주고 G_I/G_II 혼합모드 분리를 하지 않는다(W130). 구동력은 경계층 평형에
+    근거한 크기 규모 지표이지 응력장이 아니다 — 실제는 특이점을 갖는 3D 문제다.
+    """
+    return _guarded(PIPE.run_free_edge_delamination, laminate, loads=loads, fracture=fracture)
+
+
+@mcp.tool()
 def get_reference_cases(case_id: str | None = None) -> dict:
     """내장 기준 케이스를 반환한다. case_id 생략 시 목록.
 
@@ -430,6 +455,10 @@ def guide() -> str:
     판단 기준: compute_thermal_response의 warpage.w_over_thickness 또는 대처짐의 w/h가
     0.3을 넘으면 선형 결과를 그대로 쓰지 말고 위 도구로 재확인할 것(W130으로도 알린다).
     - solve_nonlinear_shear_response(laminate, loads) — 재료 자체의 전단 비선형(Hahn–Tsai).
+19) 자유 가장자리 박리: assess_free_edge_delamination(laminate, loads, fracture?) —
+    면내 강도가 통과해도 가장자리에서 먼저 뜯기는지 본다. O'Brien G 와 계면별 지배 구동력
+    (peel/transverse_shear/in_plane_shear). recover_ply_stresses 로 여유가 나왔더라도
+    각도 차가 큰 계면이 있으면 이 도구를 반드시 함께 볼 것.
       위 셋은 기하 비선형(형상이 커서 생기는 것)이고 이것은 재료 비선형이다. 전단 지배
       적층([±45] 계열)에서는 이쪽이 훨씬 크게 작용한다. ply에 shear_nonlinear가 있는데
       solve_load_response를 쓰면 W130으로 알린다.

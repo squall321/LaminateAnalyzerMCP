@@ -286,6 +286,50 @@ def _build_cases() -> dict[str, dict]:
         "tolerance": {"w_center_linear_mm": 1e-9,
                       "beta_ratio_immovable_over_movable": 1e-12},
     }
+
+    # R14 — 자유 가장자리 박리 (assess_free_edge_delamination few-shot, §19.1)
+    # [0/90]s 중앙면 기대값을 손유도 폐형해로 산출한다. 4×4 연립을 u=ε0x+ε0y, v=ε0x−ε0y 로
+    # 대칭 분해하면 2×2 두 개로 갈라져 닫힌 형태가 나온다 (엔진 경로와 독립, §8 규약).
+    a_11 = t * (q11 + q22)
+    a_12 = 2.0 * t * q12
+    b_11 = (t * t / 2.0) * (q22 - q11)
+    d_11 = (t ** 3 / 3.0) * (q11 + q22)
+    d_12 = (2.0 * t ** 3 / 3.0) * q12
+    k_sum = (a_11 + a_12) - b_11 * b_11 / (d_11 - d_12)      # u 계
+    k_dif = (a_11 - a_12) - b_11 * b_11 / (d_11 + d_12)      # v 계
+    ex_sub = 2.0 / ((2.0 * t) * (1.0 / k_sum + 1.0 / k_dif))  # [0/90] 부분적층 막 Ex
+    a11_full, a12_full = 2.0 * t * (q11 + q22), 4.0 * t * q12
+    h_fe = 4.0 * t
+    ex_lam = (a11_full * a11_full - a12_full * a12_full) / (a11_full * h_fe)
+    d_e_mid = ex_lam - ex_sub                                 # 중앙면 ΔE (양쪽 부분적층 동일)
+    gc_fe = 0.10                                              # 취성 에폭시 G_Ic ≈ 100 J/m²
+    eps_c_mid = math.sqrt(2.0 * gc_fe / (h_fe * d_e_mid))
+    cases["free_edge_cross_ply"] = {
+        "description": "[0/90]s CFRP 축인장 — 면내 강도는 통과해도 자유 가장자리에서 "
+                       "먼저 박리하는지 본다. 중앙면(90/90)은 peel(σz) 지배, "
+                       "0/90 계면은 τyz 지배로 갈린다",
+        "input": {"laminate": {
+            "unit_system": "SI_mm", "name": "free_edge_cross_ply",
+            "laminae": [{"thickness": t, "angle_deg": ang, "material": dict(_T300_MPA)}
+                        for ang in (0.0, 90.0, 90.0, 0.0)]},
+            "tool": "assess_free_edge_delamination",
+            "loads": {"N": [150.0, 0.0, 0.0]},
+            "fracture": {"G_c": gc_fe}},
+        "expected": {
+            "laminate_modulus_Ex_MPa": ex_lam,
+            "midplane_delta_E_MPa": d_e_mid,
+            "midplane_onset_strain": eps_c_mid,
+            "midplane_dominant_driver": "peel",
+            "outer_interface_dominant_driver": "transverse_shear",
+            "property": "대칭 적층이라 계면 1과 3의 G가 같다. 중앙면(계면 2)은 σy 합력이 0이고 "
+                        "모멘트만 남아 peel 지배, 0/90 계면(1·3)은 σy 합력이 남아 τyz 지배다",
+            "note": "G = (ε_x²·h/2)·(E_LAM − E*), ε_c = √(2G_c/(h·ΔE)). ΔE는 [0/90] 부분적층의 "
+                    "막 Ex를 4×4 대칭 분해로 닫힌 형태로 구해 산출했다. "
+                    "G_c는 취성 에폭시의 현실적 G_Ic 자릿수(0.10 N/mm = 100 J/m²)",
+        },
+        "tolerance": {"laminate_modulus_Ex_MPa": 1e-9, "midplane_delta_E_MPa": 1e-9,
+                      "midplane_onset_strain": 1e-9},
+    }
     return cases
 
 

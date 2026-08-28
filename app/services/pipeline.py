@@ -2075,3 +2075,161 @@ def run_nonlinear_shear(payload, loads=None, include_debug: bool = False) -> dic
     return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
                      unit_system=si.unit_system, assumptions_extra=extra,
                      include_debug=include_debug, t0=t0)
+
+
+def run_free_edge_delamination(payload, loads=None, fracture=None,
+                               include_debug: bool = False) -> dict:
+    """자유 가장자리 박리 — O'Brien ERR + 계면별 구동력 (assess_free_edge_delamination, §19.1)."""
+    from app.solver import free_edge as FE
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    if len(si.plies) < 2:
+        return ENV.build(data=None, errors=[item("E100", field="laminae",
+                                                 detail="계면이 있어야 박리를 평가할 수 있습니다 (ply 2개 이상)")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    N_si, M_si, load_err = _loads_to_si(loads, si.unit_system)
+    if load_err is not None:
+        return ENV.build(data=None, errors=[load_err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+    if not (np.all(np.isfinite(N_si)) and np.all(np.isfinite(M_si))):
+        return ENV.build(data=None, errors=[item("E100", field="loads",
+                                                 detail="loads의 모든 성분은 유한한 숫자여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    g_c = None
+    if fracture is not None:
+        gv = fracture.get("G_c") if isinstance(fracture, dict) else None
+        if not (isinstance(gv, (int, float)) and not isinstance(gv, bool)
+                and math.isfinite(gv) and gv > 0):
+            return ENV.build(data=None, errors=[item("E100", field="fracture.G_c",
+                                                     detail="fracture는 {\"G_c\": >0} (층간 파괴인성, "
+                                                            "SI: J/m², SI_mm: N/mm) 이어야 합니다")],
+                             warnings=warnings, payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+        g_c = float(gv) * units.TO_SI[si.unit_system]["energy_area"]
+
+    qbars = [MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
+             for p_ in si.plies]
+    th = list(si.thicknesses)
+    z = ABD.z_coordinates(th)
+    A, B, D, _z, h = _abd_of_plies(si.plies)
+    try:
+        eps0, kappa = RESP.solve_response(A, B, D, N_si, M_si)
+        e_lam, _ = FE.sublaminate_axial_modulus(qbars, th, 0, len(th))
+    except RESP.SingularSystemError:
+        return ENV.build(data=None, errors=[item("E400", field="laminate")], warnings=warnings,
+                         payload=payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    eps_x = float(eps0[0])
+    sig = [qbars[k] @ eps0 for k in range(len(th))]      # 막 응력 (가장자리 구동력 판정용)
+    stress_scale = max((float(np.max(np.abs(s_))) for s_ in sig), default=0.0)
+
+    f = units.FROM_SI[si.unit_system]
+    interfaces = []
+    for k in range(1, len(th)):
+        e1, t1 = FE.sublaminate_axial_modulus(qbars, th, 0, k)
+        e2, t2 = FE.sublaminate_axial_modulus(qbars, th, k, len(th))
+        e_star = (e1 * t1 + e2 * t2) / h
+        d_e = e_lam - e_star
+        g = FE.obrien_err(eps_x, h, e_lam, e_star)
+        drive = FE.interface_driving(sig, th, z, k)
+        row = {
+            "interface": k,
+            "between": [si.plies[k - 1].angle_deg, si.plies[k].angle_deg],
+            "delta_E": d_e * f["modulus"],
+            "model_valid": g is not None,
+            "G": None if g is None else g * f["energy_area"],
+            "driving": {
+                "peel_moment": drive["peel_moment"] * f["load_m"],
+                "transverse_force": drive["transverse_force"] * f["load_n"],
+                "shear_force": drive["shear_force"] * f["load_n"],
+            },
+            "dominant_driver": FE.dominant_driver(drive, h, stress_scale),
+        }
+        if g_c is not None:
+            ec = FE.onset_strain(g_c, h, d_e) if g is not None else None
+            row["onset_strain"] = ec
+            row["margin"] = (ec / abs(eps_x)) if (ec is not None and eps_x != 0.0) else None
+        interfaces.append(row)
+
+    invalid = [r["interface"] for r in interfaces if not r["model_valid"]]
+    if g_c is not None:
+        ranked = [r for r in interfaces if r.get("onset_strain") is not None]
+        governing = min(ranked, key=lambda r: (r["onset_strain"], r["interface"])) if ranked else None
+    else:
+        valid = [r for r in interfaces if r["G"] is not None]
+        governing = max(valid, key=lambda r: (r["G"], -r["interface"])) if valid else None
+
+    data: dict = {
+        "applied_strain_x": eps_x,
+        "laminate_modulus_Ex": e_lam * f["modulus"],
+        "interfaces": interfaces,
+        "governing_interface": (None if governing is None else {
+            "interface": governing["interface"],
+            "between": governing["between"],
+            "G": governing["G"],
+            "dominant_driver": governing["dominant_driver"],
+            **({"onset_strain": governing["onset_strain"], "margin": governing["margin"]}
+               if g_c is not None else {}),
+        }),
+        "definition": ("O'Brien: G = (ε_x²·h/2)·(E_LAM − E*), E* = ΣE_i·t_i/h (박리로 갈라진 "
+                       "부분적층의 두께 가중 평균). 박리 길이에 무관한 정상상태 값이라 "
+                       "임계 변형률 ε_c = √(2G_c/(h·ΔE)) 가 닫힌 형태로 나온다"),
+        "driver_definition": ("구동력은 계면 위쪽 부분적층이 지고 있는 불균형 힘·모멘트다. "
+                              "peel_moment→σz(개구), transverse_force→τyz, shear_force→τxz. "
+                              "경계층 평형 논증에 근거한 크기 규모 지표이지 응력장이 아니다"),
+    }
+
+    warn = list(warnings)
+    if g_c is None:
+        warn.append(item("W120", field="fracture",
+                         detail="층간 파괴인성 G_c 가 없어 개시 변형률·여유율을 내지 못했다. "
+                                "G(에너지방출률) 순위만 참고할 것 — fracture={\"G_c\": ...} 로 주면 "
+                                "개시 판정을 한다"))
+    warn.append(item("W130", field="mode_mixity",
+                     detail="O'Brien 의 G 는 **총** 에너지방출률이다 — G_I/G_II 혼합모드 분리를 하지 "
+                            "않는다. 층간 인성이 모드에 크게 의존하므로(보통 G_Ic ≪ G_IIc) "
+                            "보수적으로 G_Ic 를 쓰거나 혼합모드 기준을 별도로 적용할 것"))
+    warn.append(item("W130", field="driving",
+                     detail="구동력은 경계층 평형에서 나온 크기 규모 지표다. 실제 자유 가장자리 "
+                            "응력은 계면에서 특이점을 갖는 3D 탄성 문제라 개시 계면이 다를 수 있다"))
+    if invalid:
+        warn.append(item("W130", field="interfaces",
+                         detail=f"계면 {invalid} 에서 ΔE = E_LAM − E* 가 음수라 O'Brien 모델이 "
+                                f"적용되지 않는다(G = null). **구동력이 없다는 뜻이 아니다** — "
+                                f"이 계면들은 이 도구로 판정할 수 없으니 별도 해석이 필요하다"))
+    A_hat, B_hat, _Dh, _Kh = ABD.normalized_stiffness(A, B, D, h)
+    if float(np.linalg.norm(B_hat)) > 1e-6 * float(np.linalg.norm(A_hat)):
+        warn.append(item("W130", field="laminate",
+                         detail="비대칭 적층 — O'Brien 모델은 대칭 적층의 균일 축변형을 전제한다. "
+                                "막-굽힘 커플링이 있으면 ε_x 가 두께 방향으로 일정하지 않아 G 가 근사다"))
+    if float(np.linalg.norm(M_si)) > 0.0:
+        warn.append(item("W130", field="loads.M",
+                         detail="굽힘 모멘트가 걸려 있다 — O'Brien 모델은 축방향 인장을 전제한다. "
+                                "ε_x 는 중앙면 값이며 G 는 참고값이다"))
+    if eps_x <= 0.0:
+        warn.append(item("W130", field="loads",
+                         detail=f"축방향 변형률이 {eps_x:.3g} 로 인장이 아니다 — 가장자리 박리는 "
+                                f"인장에서 평가한다. 압축이면 좌굴 유발 박리를 별도로 볼 것"))
+
+    extra = [
+        "O'Brien(1985) 가장자리 박리 ERR — 대칭 적층·균일 축인장·정상상태(박리 길이 무관) 가정",
+        "E* 는 부분적층이 자유단에서 굽는 연화까지 포함한 막 유효탄성계수로 계산한다",
+        "혼합모드 분리 없음 — 총 G 만 준다",
+        *_source_assumptions(si),
+    ]
+    hash_payload = {"laminate": payload, "loads": loads, "fracture": fracture}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
+                         payload=hash_payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     unit_system=si.unit_system, assumptions_extra=extra,
+                     include_debug=include_debug, t0=t0)

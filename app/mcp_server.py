@@ -338,6 +338,24 @@ def compute_postbuckling(laminate: dict, panel: dict, applied_Nx: float,
 
 
 @mcp.tool()
+def solve_nonlinear_shear_response(laminate: dict, loads: dict) -> dict:
+    """재료 면내 전단 비선형(Hahn–Tsai) 응답 — 전단 지배 적층이 선형보다 훨씬 무른 이유.
+
+    UD 복합재의 면내 전단은 기지 지배라 뚜렷이 비선형이다: γ12 = τ12/G12 + S6666·τ12³.
+    τ가 커질수록 할선 G가 떨어져 [±45] 인장처럼 전단 지배 적층은 선형 CLT가 강성을
+    크게 과대평가한다(예: [±45]s에 Nx=50 N/mm → Ex가 선형의 61%).
+    각 ply의 material.shear_nonlinear = {"S6666": ...} 필요 (단위 1/응력³ — SI: 1/Pa³,
+    SI_mm: 1/MPa³. CFRP는 1/MPa³ 기준 1e-8 자릿수). 없는 ply는 선형으로 두고 W120으로 알린다.
+    loads = {"N":[Nx,Ny,Nxy], "M":[Mx,My,Mxy]} (단위 폭당) — solve_load_response와 동일.
+    반환: response(비선형)와 linear_response(대조), softening(할선/선형 유효상수 비),
+    ply별 τ12·γ12·G12_secant, convergence(구성식 잔차).
+    주의: 3차식에는 강도 한계가 없어 파손 이후에도 답을 낸다. γ12 > 0.05 면 W130이 뜨며
+    recover_ply_stresses로 파손 판정을 반드시 병행할 것.
+    """
+    return _guarded(PIPE.run_nonlinear_shear, laminate, loads=loads)
+
+
+@mcp.tool()
 def get_reference_cases(case_id: str | None = None) -> dict:
     """내장 기준 케이스를 반환한다. case_id 생략 시 목록.
 
@@ -411,6 +429,10 @@ def guide() -> str:
     - compute_postbuckling(laminate, panel, applied_Nx) — N>N_cr 이후 진폭·강성비·유효폭.
     판단 기준: compute_thermal_response의 warpage.w_over_thickness 또는 대처짐의 w/h가
     0.3을 넘으면 선형 결과를 그대로 쓰지 말고 위 도구로 재확인할 것(W130으로도 알린다).
+    - solve_nonlinear_shear_response(laminate, loads) — 재료 자체의 전단 비선형(Hahn–Tsai).
+      위 셋은 기하 비선형(형상이 커서 생기는 것)이고 이것은 재료 비선형이다. 전단 지배
+      적층([±45] 계열)에서는 이쪽이 훨씬 크게 작용한다. ply에 shear_nonlinear가 있는데
+      solve_load_response를 쓰면 W130으로 알린다.
 
 ## materialtwin 연계 (물성을 모를 때)
 - materialtwin MCP의 list_materials/search_by_property → get_material에서 실측 E를 얻는다.

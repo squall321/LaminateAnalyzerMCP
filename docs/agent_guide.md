@@ -189,6 +189,22 @@ margin<1이면 박리 예상. `ilss_unevaluated`가 있으면 그 위치는 강�
 `stiffness_ratio`(등방 정사각에서 정확히 0.5), `effective_width_ratio`(b_eff/b=√(N_cr/N)),
 `amplitude_over_thickness`를 준다. N_cr·모드는 `compute_buckling`과 동일하다.
 
+**`solve_nonlinear_shear_response(laminate, loads)`** — 위 셋은 **기하** 비선형(형상이 커서
+생기는 것)이고 이것은 **재료** 비선형이다. UD 복합재의 면내 전단은 기지 지배라 뚜렷이
+비선형이라(γ12 = τ12/G12 + S6666·τ12³), 전단 지배 적층에서는 이쪽이 훨씬 크게 작용한다.
+
+- 실측 예: [±45]s CFRP에 Nx=50 N/mm → ply τ12 = 50 MPa, 할선 G12가 선형의 58%,
+  적층 **Ex가 선형의 61%**. 선형 CLT만 믿으면 강성을 60% 과대평가한다.
+- ply에 `material.shear_nonlinear = {"S6666": ...}` 필요. 단위 **1/응력³**
+  (SI: 1/Pa³, SI_mm: 1/MPa³, CFRP는 1/MPa³ 기준 1e-8 자릿수). 없는 ply는 선형으로 두고 W120.
+- **재미있는 불변식**: [±45]에서 적층 Gxy는 전혀 안 변하고 Ex만 떨어진다(45°에서 Q̄66의
+  Q66 의존이 정확히 상쇄되기 때문). 전단 비선형이 적층 수준에서 어디로 나타나는지는
+  적층각에 따라 완전히 다르다 — 직관으로 넘겨짚지 말 것.
+- **필수 주의**: 3차식에는 강도 한계가 없어 **파손 이후에도 계속 답을 낸다**.
+  γ12 > 0.05 면 W130이 뜬다 — 그때는 `recover_ply_stresses`로 파손 판정을 반드시 병행하고,
+  사용자에게 "이 값은 이미 파손했을 영역"이라고 전할 것.
+- `solve_load_response`에 shear_nonlinear 물성이 있는 적층을 넣으면 W130으로 이 도구를 가리킨다.
+
 **공통 주의.** §18 도구는 §17까지와 달리 **폐형해가 아니라 Rayleigh–Ritz/Galerkin 저차 근사**다.
 분기·임계값·경향은 신뢰하되 **절대값은 FE 대비 오차**가 있다(선형 극한에서도 등방 정사각 +2.4%).
 응답의 assumptions를 반드시 함께 보고할 것.

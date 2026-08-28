@@ -203,6 +203,14 @@ def run_load_response(payload, loads=None, scan_principal_direction: bool = True
         return ENV.build(data=None, errors=[load_err], warnings=warnings, payload=payload,
                          unit_system=si.unit_system, include_debug=include_debug, t0=t0)
 
+    # §18.7 게이트 — 전단 비선형 물성이 있는데 선형으로 푸는 중임을 알린다
+    nl_plies = [k for k, p_ in enumerate(si.plies) if p_.s6666 is not None]
+    if nl_plies:
+        warnings.append(item("W130", field="laminae",
+                             detail=f"laminae{nl_plies} 에 shear_nonlinear(S6666)가 있으나 이 도구는 "
+                                    f"선형 G12로 풉니다. 전단 지배 적층이면 강성을 크게 과대평가합니다 — "
+                                    f"solve_nonlinear_shear_response 를 쓰세요"))
+
     A, B, D, z, h = _abd_of_plies(si.plies)
     f = units.FROM_SI[si.unit_system]
     try:
@@ -1853,6 +1861,138 @@ def run_postbuckling(payload, panel, applied_Nx, load_ratio: float = 0.0,
     ]
     hash_payload = {"laminate": payload, "panel": panel, "applied_Nx": applied_Nx,
                     "load_ratio": load_ratio}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
+                         payload=hash_payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     unit_system=si.unit_system, assumptions_extra=extra,
+                     include_debug=include_debug, t0=t0)
+
+
+GAMMA12_VALID_LIMIT = 0.05      # 이 이상은 실제로 이미 전단 파손 영역 (§18.7)
+
+
+def run_nonlinear_shear(payload, loads=None, include_debug: bool = False) -> dict:
+    """재료 면내 전단 비선형 응답 — Hahn–Tsai 할선반복 (solve_nonlinear_shear_response, §18.7)."""
+    from app.solver import shear_nonlinear as SNL
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+
+    N_si, M_si, load_err = _loads_to_si(loads, si.unit_system)
+    if load_err is not None:
+        return ENV.build(data=None, errors=[load_err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+    if not (np.all(np.isfinite(N_si)) and np.all(np.isfinite(M_si))):
+        return ENV.build(data=None, errors=[item("E100", field="loads",
+                                                 detail="loads의 모든 성분은 유한한 숫자여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    nl_idx = [k for k, p in enumerate(si.plies) if p.s6666 is not None]
+    if not nl_idx:
+        return ENV.build(data=None, errors=[item("E100", field="laminae",
+                                                 detail="어느 ply에도 material.shear_nonlinear{S6666}가 없습니다 — "
+                                                        "선형과 동일하므로 solve_load_response를 쓰세요")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    linear_only = [k for k in range(len(si.plies)) if k not in nl_idx]
+    if linear_only:
+        warnings.append(item("W120", field="laminae",
+                             detail=f"laminae{linear_only} 에 shear_nonlinear가 없어 선형 G12로 다룹니다"))
+
+    plies = [{"E1": p.E1, "E2": p.E2, "G12": p.G12, "nu12": p.nu12,
+              "angle_deg": p.angle_deg, "s6666": p.s6666} for p in si.plies]
+    z = ABD.z_coordinates(si.thicknesses)
+    h = si.total_thickness
+    try:
+        res = SNL.solve_secant(plies, z, N_si, M_si)
+        lin = SNL.linear_reference(plies, z, N_si, M_si)
+        a_s, _, d_s = RESP.compliance_blocks(res["A"], res["B"], res["D"])
+        a_l, _, d_l = RESP.compliance_blocks(lin["A"], lin["B"], lin["D"])
+        eff_s = RESP.effective_constants(a_s, d_s, h)
+        eff_l = RESP.effective_constants(a_l, d_l, h)
+    except RESP.SingularSystemError:
+        return ENV.build(data=None, errors=[item("E400", field="laminate")], warnings=warnings,
+                         payload=payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    f = units.FROM_SI[si.unit_system]
+    fm = f["modulus"]
+
+    def _eff(e):
+        return {"membrane": {k: (v * fm if k != "nu_xy" else v) for k, v in e["membrane"].items()},
+                "bending": {k: v * fm for k, v in e["bending"].items()}}
+
+    per_ply = [{"ply": r["ply"], "tau12": r["tau12"] * fm, "gamma12": r["gamma12"],
+                "G12_secant": r["G12_secant"] * fm, "secant_ratio": r["secant_ratio"],
+                "nonlinear": r["nonlinear"]} for r in res["per_ply"]]
+    max_gamma = max(abs(r["gamma12"]) for r in res["per_ply"])
+    worst = min(res["per_ply"], key=lambda r: r["secant_ratio"])
+
+    trunc = None
+    if len(per_ply) > config.SUMMARY_PLY_LIMIT:
+        ranked = sorted(per_ply, key=lambda r: r["secant_ratio"])
+        per_ply = sorted(ranked[:config.SUMMARY_TOP_N], key=lambda r: r["ply"])
+        trunc = (f"ply {len(res['per_ply'])}개 중 연화가 큰 {len(per_ply)}개만 반환 (§6.6 토큰 예산). "
+                 f"softening은 전체 기준")
+
+    def _ratio(nl, l0):
+        return float(l0 / nl) if abs(nl) > 0 else None
+
+    data = {
+        "response": {"epsilon0": res["eps0"].tolist(),
+                     "kappa": (res["kappa"] * f["kappa"]).tolist()},
+        "linear_response": {"epsilon0": lin["eps0"].tolist(),
+                            "kappa": (lin["kappa"] * f["kappa"]).tolist(),
+                            "note": "S6666을 무시한 선형 CLT 해 — 대조용"},
+        "softening": {
+            "Gxy_secant_over_linear": float(eff_s["membrane"]["Gxy"] / eff_l["membrane"]["Gxy"]),
+            "Ex_secant_over_linear": float(eff_s["membrane"]["Ex"] / eff_l["membrane"]["Ex"]),
+            "max_gamma12": float(max_gamma),
+            "worst_ply": {"ply": worst["ply"], "secant_ratio": float(worst["secant_ratio"])},
+            "definition": "할선/선형 유효상수 비. 1보다 작을수록 전단 비선형으로 무르다",
+        },
+        "per_ply": per_ply,
+        **({"truncation": trunc} if trunc else {}),
+        "effective_constants": _eff(eff_s),
+        "linear_effective_constants": _eff(eff_l),
+        "convergence": {
+            "iterations": res["steps"],
+            "constitutive_residual": res["residual"],
+            "converged": res["converged"],
+            "definition": "잔차 = |γ12 − (τ12/G12 + S6666·τ12³)| / |γ12| 의 ply 최대 (수렴의 진짜 척도)",
+        },
+        "definition": "γ12 = τ12/G12 + S6666·τ12³ (Hahn–Tsai). ply별 할선 G12를 고정 40회 반복으로 갱신",
+    }
+
+    warn = list(warnings)
+    if not res["converged"]:
+        warn.append(item("W130", field="convergence",
+                         detail=f"고정 {res['steps']}회 반복 후 구성식 잔차 {res['residual']:.3g} — "
+                                f"수렴하지 않았다. 하중을 낮춰 단조성을 확인할 것"))
+    if max_gamma > GAMMA12_VALID_LIMIT:
+        warn.append(item("W130", field="softening.max_gamma12",
+                         detail=f"γ12 = {max_gamma:.3g} > {GAMMA12_VALID_LIMIT} — Hahn–Tsai 3차식에는 "
+                                f"강도 한계가 없어 파손 이후에도 계속 답을 낸다. 실제로는 이미 전단 "
+                                f"파손했을 가능성이 크다. recover_ply_stresses로 파손 판정을 병행할 것"))
+    if any(p.strength is None for p in si.plies):
+        warn.append(item("W120", field="laminae",
+                         detail="강도 데이터가 없어 파손 여부를 함께 판정하지 못했다 — "
+                                "전단 연화가 큰 결과는 파손 후 영역일 수 있다"))
+
+    extra = [
+        "Hahn–Tsai 1파라미터 전단 비선형. ply당 할선 G12 하나를 쓰므로 구성식은 그 ply의 "
+        "|τ12| 최대점(하단·중앙·상단 3점)에서 정확히 만족한다 — 굽힘 지배 하중에서는 근사다",
+        "|τ12| 최대점을 쓰는 것은 보수적 선택이다(할선 G가 더 작아 더 무르게 나온다)",
+        "E1·E2·ν12는 선형으로 둔다 — 섬유 지배 방향의 비선형은 이 모델의 범위 밖",
+        f"할선 반복은 저완화 {SNL.RELAXATION} 로 고정 {SNL.SECANT_STEPS} 회 (결정론 — 조기 종료 없음)",
+        *_source_assumptions(si),
+    ]
+    hash_payload = {"laminate": payload, "loads": loads}
     if ENV.contains_nan_inf(data):
         return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
                          payload=hash_payload, unit_system=si.unit_system,

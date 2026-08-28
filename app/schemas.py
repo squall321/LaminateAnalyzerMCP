@@ -36,6 +36,16 @@ class FatigueSN(BaseModel):
                             description="basquin 지수 (금속 ~0.08~0.12)")
 
 
+class ShearNonlinear(BaseModel):
+    """면내 전단 비선형 (Hahn–Tsai, §18.7). γ12 = τ12/G12 + S6666·τ12³.
+
+    S6666 단위는 1/응력³ (SI: 1/Pa³, SI_mm: 1/MPa³). CFRP는 1/MPa³ 기준 1e-8 자릿수.
+    """
+    model_config = ConfigDict(extra="forbid")
+    model_type: Literal["hahn_tsai"] = Field(default="hahn_tsai")
+    S6666: float = Field(ge=0, description="3차항 계수 [1/응력^3]. 0이면 선형과 동일")
+
+
 class Viscoelastic(BaseModel):
     """보호층 이완 특성 (준탄성 근사용, §17.2). materialtwin Prony(E0/Einf/tau)와 단위 정합."""
     model_config = ConfigDict(extra="forbid")
@@ -80,6 +90,7 @@ class Orthotropic2DMaterial(BaseModel):
     viscoelastic: Viscoelastic | None = None
     strength: Strength | None = None
     fatigue: FatigueSN | None = None
+    shear_nonlinear: ShearNonlinear | None = None
     name: str | None = Field(default=None, description="재료 라벨 (추적용)")
     source: SourceInfo | None = None
 

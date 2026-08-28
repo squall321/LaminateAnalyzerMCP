@@ -104,3 +104,27 @@ def dominant_driver(drive: dict, h: float, stress_scale: float) -> str:
     top = max(mags, key=lambda k: mags[k])
     # 잔여 수치오차를 구동력으로 오인하지 않도록 ply 응력 규모 대비 상대 문턱을 쓴다
     return "none" if mags[top] <= 1.0e-6 * max(abs(stress_scale), 1e-300) else top
+
+
+# ── 혼합모드 (계획서 §19.9) ─────────────────────────────────────────────────
+
+BK_ETA_DEFAULT = 2.0        # Benzeggagh–Kenane 지수 (CFRP 통상 1.5~2.5)
+
+
+def is_mirror_split(angles: list[float], thicknesses: list[float], k: int) -> bool:
+    """계면 k 에서 갈린 두 부분적층이 서로 거울상인가.
+
+    거울상이면 두 부분적층의 축강성이 정확히 같아 **상대 미끄러짐이 0** 이다 —
+    대칭 논증만으로 Mode II 가 없다고 말할 수 있다(수치 근사가 아니다).
+    실측: 대칭 적층의 중앙면에서만 성립하고 거기서 E1 = E2 가 정확히 맞는다.
+    """
+    a1, a2 = list(angles[:k]), list(angles[k:])
+    t1, t2 = list(thicknesses[:k]), list(thicknesses[k:])
+    return a1[::-1] == a2 and t1[::-1] == t2
+
+
+def benzeggagh_kenane(g_ic: float, g_iic: float, mode_ii_fraction: float,
+                      eta: float = BK_ETA_DEFAULT) -> float:
+    """혼합모드 인성 Gc = G_Ic + (G_IIc − G_Ic)·(G_II/G_T)^η."""
+    frac = min(1.0, max(0.0, mode_ii_fraction))
+    return g_ic + (g_iic - g_ic) * (frac ** eta)

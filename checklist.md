@@ -66,6 +66,10 @@
       등방 정사각 k=10.74(정해 10.07 대비 상계 +6.6%)를 W130으로 명시
 - [x] ~~지배 파손모드 게이트~~ — v0.11.0 압축 하중 좌굴 침묵 봉쇄(실측 410배 모순),
       열 구속 좌굴 ΔT_cr, panel 미지 키 침묵 차단, 자유단 W130 이 신규 도구 지목
+- [x] ~~박리 혼합모드~~ — v0.12.0 거울 분할은 대칭 논증으로 순수 Mode I(정확), 그 외는
+      G_Ic~G_IIc 범위. Benzeggagh–Kenane. Suo–Hutchinson 위상각은 수치표라 미탑재
+- [x] ~~열잔류 파손·피로 반영~~ — v0.12.0 tsai_wu_with_offset (R 2차식 정해). 진행성 파손은
+      단계마다 잔류 재계산, 피로는 평균응력 이동. ΔT=−150K 에서 FPF −81%, 수명 8자릿수 감소
 - [ ] (보류) 채널링 g(α,β) 보정표 — 수기 이식 리스크로 미탑재 유지 (계획서 §17.7.3)
 - [x] ~~기하 비선형 (V3)~~ — v0.8.0: compute_bistable_shapes(Hyer 쌍안정·임계 판 크기)
       + compute_large_deflection(von Karman, movable/immovable) + compute_postbuckling

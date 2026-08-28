@@ -19,6 +19,7 @@ from app.solver import abd as ABD
 from app.solver import failure as FAIL
 from app.solver import material as MAT
 from app.solver import response as RESP
+from app.solver import thermal as THERM
 
 FIBER_MODES = ("fiber_tension", "fiber_compression")
 # 응력이 참조 스케일(적층 전체 최대 |σ|)의 이 비율 미만이면 파손 판정에서 제외 —
@@ -30,8 +31,15 @@ STRESS_FLOOR_RATIO = 1.0e-6
 COLLAPSE_RESPONSE_RATIO = 10.0
 
 
-def run(plies, N: np.ndarray, M: np.ndarray, discount: float = 0.1) -> dict:
-    """plies: SiPly 목록(원본 불변), (N, M): SI 하중 패턴. 반환: events·ultimate 등 (§17.5.3)."""
+def run(plies, N: np.ndarray, M: np.ndarray, discount: float = 0.1,
+        eps_free: list[np.ndarray] | None = None) -> dict:
+    """plies: SiPly 목록(원본 불변), (N, M): SI 하중 패턴. 반환: events·ultimate 등 (§17.5.3).
+
+    eps_free 를 주면 **각 단계마다 잔류응력을 다시 계산**한다(§19.10). 강성을 깎으면
+    열하중 합력 N_th = ΣQ̄ε_free t 도 바뀌므로 한 번 계산해 재사용하면 안 된다.
+    잔류는 하중 배수 R 과 함께 커지지 않으므로 σ(R) = R·σ_mech + σ_res 로 분리해
+    tsai_wu_with_offset 으로 푼다 — 비례하중 가정을 쓰면 잔류분까지 R 배 되어 틀린다.
+    """
     work = [dataclasses.replace(p) for p in plies]
     matrix_failed = [False] * len(work)
     fiber_failed = [False] * len(work)
@@ -52,6 +60,11 @@ def run(plies, N: np.ndarray, M: np.ndarray, discount: float = 0.1) -> dict:
             break
         try:
             eps0, kappa = RESP.solve_response(A, B, D, N, M)
+            if eps_free is not None:
+                n_th, m_th = THERM.free_strain_loads(qbars, eps_free, z)
+                eps0_r, kappa_r = RESP.solve_response(A, B, D, n_th, m_th)
+            else:
+                eps0_r = kappa_r = None
         except RESP.SingularSystemError:
             termination = "stiffness_singular"
             break
@@ -66,13 +79,20 @@ def run(plies, N: np.ndarray, M: np.ndarray, discount: float = 0.1) -> dict:
 
         # ply×3점 응력을 먼저 모아 참조 스케일을 정한다 (상대 임계용)
         s12_all: dict[tuple[int, int], np.ndarray] = {}
+        res_all: dict[tuple[int, int], np.ndarray] = {}
         ref = 0.0
         for k, p in enumerate(work):
             for j, zv in enumerate((float(z[k]), float(z[k] + z[k + 1]) / 2.0, float(z[k + 1]))):
                 s12 = FAIL.stress_to_material_axes(
                     FAIL.ply_stresses_at(qbars[k], eps0, kappa, zv), p.angle_deg)
                 s12_all[(k, j)] = s12
-                ref = max(ref, float(np.max(np.abs(s12))))
+                if eps0_r is None:
+                    res_all[(k, j)] = np.zeros(3)
+                else:
+                    sig_r = qbars[k] @ (eps0_r + zv * kappa_r - eps_free[k])
+                    res_all[(k, j)] = FAIL.stress_to_material_axes(sig_r, p.angle_deg)
+                ref = max(ref, float(np.max(np.abs(s12))),
+                          float(np.max(np.abs(res_all[(k, j)]))))
         floor = ref * STRESS_FLOOR_RATIO
 
         best = None      # (R, ply, mode)
@@ -82,20 +102,28 @@ def run(plies, N: np.ndarray, M: np.ndarray, discount: float = 0.1) -> dict:
             Xt, Xc, Yt, Yc, S = plies[k].strength
             for j in range(3):
                 s12 = s12_all[(k, j)]
-                if float(np.max(np.abs(s12))) <= floor:
+                s_res = res_all[(k, j)]
+                if max(float(np.max(np.abs(s12))), float(np.max(np.abs(s_res)))) <= floor:
                     continue                      # 무시할 응력 — 스퓨리어스 사건 방지
                 if matrix_failed[k]:
-                    s1 = float(s12[0])
+                    # 섬유 모드: R·σm1 + σr1 = Xt (또는 −Xc) 를 R 로 푼다
+                    s1, r1 = float(s12[0]), float(s_res[0])
                     if abs(s1) <= floor:
                         continue
-                    r = Xt / s1 if s1 > 0 else Xc / (-s1)
+                    lim = Xt if s1 > 0 else -Xc
+                    r = (lim - r1) / s1
                     mode = "fiber_tension" if s1 > 0 else "fiber_compression"
+                    if r < 0.0:
+                        continue                  # 이 방향으로는 도달 불가
                 else:
-                    r = FAIL.tsai_wu(s12, Xt, Xc, Yt, Yc, S).get("strength_ratio")
+                    r = FAIL.tsai_wu_with_offset(s12, s_res, Xt, Xc, Yt, Yc, S).get("strength_ratio")
                     if r is None:
                         continue
-                    mode = FAIL.max_stress(s12, Xt, Xc, Yt, Yc, S)["mode"]
-                if r > 0 and (best is None or r < best[0]):
+                    # 지배 모드는 **파손 시점의 총 응력**(R·σm + σr)으로 판정한다 —
+                    # 기계 응력만 보면 잔류가 지배하는 경우 모드가 틀린다
+                    mode = FAIL.max_stress(r * s12 + s_res, Xt, Xc, Yt, Yc, S)["mode"]
+                # R = 0 은 "잔류만으로 이미 파손" 이라는 유효한 결과다 — 버리지 않는다
+                if r >= 0 and (best is None or r < best[0]):
                     best = (r, k, mode)
 
         if best is None:

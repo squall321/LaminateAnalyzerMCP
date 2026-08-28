@@ -1267,9 +1267,11 @@ def run_frequencies(payload, panel, n_modes: int = 5, boundary: str = "simply_su
                      include_debug=include_debug, t0=t0)
 
 
-def run_progressive(payload, loads, discount: float = 0.1, include_debug: bool = False) -> dict:
-    """ply discount 진행성 파손 — FPF→한계하중 (run_progressive_failure Tool, §17.5.3)."""
+def run_progressive(payload, loads, discount: float = 0.1, delta_t=None,
+                    include_debug: bool = False) -> dict:
+    """ply discount 진행성 파손 — FPF→한계하중 (run_progressive_failure Tool, §17.5.3·§19.10)."""
     from app.solver import progressive as PROG
+    from app.solver import thermal as TH
     t0 = time.perf_counter()
     si, errors, warnings = VAL.validate_and_convert(payload)
     if errors:
@@ -1292,7 +1294,28 @@ def run_progressive(payload, loads, discount: float = 0.1, include_debug: bool =
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
 
-    res = PROG.run(si.plies, N_si, M_si, float(discount))
+    # §19.10 열잔류 — 각 discount 단계마다 재계산한다(강성이 바뀌면 잔류도 바뀐다)
+    eps_free = None
+    dT = 0.0
+    if delta_t is not None:
+        if not (isinstance(delta_t, (int, float)) and not isinstance(delta_t, bool)
+                and math.isfinite(delta_t)):
+            return ENV.build(data=None, errors=[item("E100", field="delta_T",
+                                                     detail="delta_T는 유한한 숫자여야 합니다")],
+                             warnings=warnings, payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+        dT = float(delta_t)
+        if dT != 0.0:
+            missing = [k for k, p_ in enumerate(si.plies) if not p_.has_cte]
+            if missing:
+                return ENV.build(data=None, errors=[item("E203", field="laminae",
+                                                         detail=f"laminae{missing} 에 CTE(alpha)가 없습니다 (delta_T 해석)")],
+                                 warnings=warnings, payload=payload, unit_system=si.unit_system,
+                                 include_debug=include_debug, t0=t0)
+            eps_free = [TH.alpha_vector(p_.alpha1, p_.alpha2, p_.angle_deg) * dT
+                        for p_ in si.plies]
+
+    res = PROG.run(si.plies, N_si, M_si, float(discount), eps_free=eps_free)
     f = units.FROM_SI[si.unit_system]
     events = res["events"]
     trunc = None
@@ -1311,9 +1334,20 @@ def run_progressive(payload, loads, discount: float = 0.1, include_debug: bool =
         "termination": res["termination"],
         "meaning": "R = 입력 하중 패턴의 배수. ultimate_R×loads = 하중 제어 용량(최대 지지 하중)",
     }
+    data["delta_T"] = dT if dT != 0.0 else None
     if no_strength:
         data["note"] = f"laminae{no_strength}는 strength 미입력 — 탄성 유지(비파손) 가정"
-    hash_payload = {"laminate": payload, "loads": loads, "discount": discount}
+    if dT == 0.0 and any(p_.has_cte for p_ in si.plies):
+        warnings.append(item("W130", field="delta_T",
+                             detail="ply 에 CTE 가 있는데 delta_T 를 주지 않았다 — 경화 냉각 잔류응력이 "
+                                    "빠져 있다. 실측으로 [0/90]s CFRP 는 ΔT=−150 K 에서 FPF 하중이 "
+                                    "81% 낮아진다. delta_T 를 주면 각 단계마다 잔류를 재계산한다"))
+    if res["events"] and res["events"][0]["R"] <= 0.0:
+        warnings.append(item("W130", field="first_ply_failure_R",
+                             detail="FPF 하중 배수가 0 이다 — **기계 하중 없이 잔류응력만으로 이미 "
+                                    "파손**한다. 냉각 폭이나 강도 입력을 확인할 것"))
+    hash_payload = {"laminate": payload, "loads": loads, "discount": discount,
+                    "delta_T": delta_t}
     if ENV.contains_nan_inf(data):
         return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warnings,
                          payload=hash_payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
@@ -1500,7 +1534,7 @@ def run_interlaminar(payload, shear=None, detail: str = "auto",
                      include_debug=include_debug, t0=t0)
 
 
-def run_fatigue(payload, loads_max, loads_min=None, detail: str = "auto",
+def run_fatigue(payload, loads_max, loads_min=None, detail: str = "auto", delta_t=None,
                 include_debug: bool = False) -> dict:
     """하중 사이클의 ply별 피로 수명 (estimate_fatigue_life Tool, §17.7).
 
@@ -1584,6 +1618,37 @@ def run_fatigue(payload, loads_max, loads_min=None, detail: str = "auto",
         return ENV.build(data=None, errors=[item("E400", field="laminate")], warnings=warnings,
                          payload=payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
 
+    # §19.10 열잔류 — 잔류는 진폭을 바꾸지 않고 **평균응력만 이동**시킨다. Goodman 이
+    # 인장 평균에 벌점을 주므로 냉각 잔류가 인장인 ply 는 수명이 크게 줄어든다.
+    dT = 0.0
+    res_state = None
+    if delta_t is not None:
+        from app.solver import thermal as TH
+        if not (isinstance(delta_t, (int, float)) and not isinstance(delta_t, bool)
+                and math.isfinite(delta_t)):
+            return ENV.build(data=None, errors=[item("E100", field="delta_T",
+                                                     detail="delta_T는 유한한 숫자여야 합니다")],
+                             warnings=warnings, payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+        dT = float(delta_t)
+        if dT != 0.0:
+            missing = [k for k, p_ in enumerate(si.plies) if not p_.has_cte]
+            if missing:
+                return ENV.build(data=None, errors=[item("E203", field="laminae",
+                                                         detail=f"laminae{missing} 에 CTE(alpha)가 없습니다 (delta_T 해석)")],
+                                 warnings=warnings, payload=payload, unit_system=si.unit_system,
+                                 include_debug=include_debug, t0=t0)
+            eps_free = [TH.alpha_vector(p_.alpha1, p_.alpha2, p_.angle_deg) * dT
+                        for p_ in si.plies]
+            n_th, m_th = TH.free_strain_loads(qbars, eps_free, z)
+            try:
+                e_r, k_r = RESP.solve_response(A, B, D, n_th, m_th)
+            except RESP.SingularSystemError:
+                return ENV.build(data=None, errors=[item("E400", field="laminate")], warnings=warnings,
+                                 payload=payload, unit_system=si.unit_system,
+                                 include_debug=include_debug, t0=t0)
+            res_state = (e_r, k_r, eps_free)
+
     fmod = units.FROM_SI[si.unit_system]["modulus"]
     fz = units.FROM_SI[si.unit_system]["z"]
     rows = []
@@ -1596,6 +1661,11 @@ def run_fatigue(payload, loads_max, loads_min=None, detail: str = "auto",
                 FAIL.ply_stresses_at(qbars[k], e_max, k_max, zv), p_.angle_deg)
             s_lo = FAIL.stress_to_material_axes(
                 FAIL.ply_stresses_at(qbars[k], e_min, k_min, zv), p_.angle_deg)
+            if res_state is not None:
+                e_r, k_r, eps_free = res_state
+                sr = FAIL.stress_to_material_axes(
+                    qbars[k] @ (e_r + zv * k_r - eps_free[k]), p_.angle_deg)
+                s_hi, s_lo = s_hi + sr, s_lo + sr    # 두 끝에 같은 값 → 평균만 이동
             # 성분별로 큰 쪽을 max로 정렬 — loads_max/min 라벨 순서에 결과가 의존하지 않게 (FAT-02/04)
             hi = np.maximum(s_hi, s_lo)
             lo = np.minimum(s_hi, s_lo)
@@ -1650,10 +1720,16 @@ def run_fatigue(payload, loads_max, loads_min=None, detail: str = "auto",
         "meaning": ("life_cycles = 임계 ply의 반복 수명 추정 (성분별 부호 보존 진폭·평균 + Goodman + S-N). "
                     f"{FAT.N_CAP:.0e} 도달 시 at_cap=true. life_cycles=null이면 전 ply 진폭 0(무손상)"),
     }
+    data["delta_T"] = dT if dT != 0.0 else None
     if skipped:
         data["excluded_plies"] = skipped
+    if dT == 0.0 and any(p_.has_cte for p_ in si.plies):
+        warnings.append(item("W130", field="delta_T",
+                             detail="ply 에 CTE 가 있는데 delta_T 를 주지 않았다 — 경화 냉각 잔류가 "
+                                    "평균응력을 이동시키는데 빠져 있다. Goodman 이 인장 평균에 벌점을 "
+                                    "주므로 수명이 과대평가(비보수)일 수 있다"))
     hash_payload = {"laminate": payload, "loads_max": loads_max, "loads_min": loads_min,
-                    "detail": detail}
+                    "detail": detail, "delta_T": delta_t}
     if ENV.contains_nan_inf(data):
         return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warnings,
                          payload=hash_payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
@@ -2280,21 +2356,51 @@ def run_free_edge_delamination(payload, loads=None, fracture=None,
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
 
-    g_c = None
+    g_c = g_ic = g_iic = None
+    bk_eta = FE.BK_ETA_DEFAULT
     if fracture is not None:
-        gv = fracture.get("G_c") if isinstance(fracture, dict) else None
-        if not (isinstance(gv, (int, float)) and not isinstance(gv, bool)
-                and math.isfinite(gv) and gv > 0):
-            return ENV.build(data=None, errors=[item("E100", field="fracture.G_c",
-                                                     detail="fracture는 {\"G_c\": >0} (층간 파괴인성, "
-                                                            "SI: J/m², SI_mm: N/mm) 이어야 합니다")],
+        if not isinstance(fracture, dict):
+            return ENV.build(data=None, errors=[item("E100", field="fracture",
+                                                     detail="fracture는 객체여야 합니다")],
                              warnings=warnings, payload=payload, unit_system=si.unit_system,
                              include_debug=include_debug, t0=t0)
-        g_c = float(gv) * units.TO_SI[si.unit_system]["energy_area"]
+        extra_keys = set(fracture) - {"G_c", "G_Ic", "G_IIc", "eta"}
+        f_e = units.TO_SI[si.unit_system]["energy_area"]
+
+        def _pos(key):
+            v = fracture.get(key)
+            return (isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and math.isfinite(v) and v > 0)
+
+        err_f = None
+        if extra_keys:
+            err_f = item("E100", field="fracture",
+                         detail=f"fracture 에 지원하지 않는 키 {sorted(extra_keys)} 가 있습니다. "
+                                f"{{\"G_c\"}} 또는 {{\"G_Ic\", \"G_IIc\", \"eta\"?}} 만 허용합니다")
+        elif _pos("G_Ic") and _pos("G_IIc"):
+            g_ic, g_iic = float(fracture["G_Ic"]) * f_e, float(fracture["G_IIc"]) * f_e
+            if g_iic < g_ic:
+                err_f = item("E100", field="fracture.G_IIc",
+                             detail="G_IIc 는 보통 G_Ic 보다 크다 — 값을 바꿔 넣지 않았는지 확인하세요")
+            if "eta" in fracture:
+                if not _pos("eta"):
+                    err_f = item("E100", field="fracture.eta", detail="eta 는 양수여야 합니다")
+                else:
+                    bk_eta = float(fracture["eta"])
+        elif _pos("G_c"):
+            g_c = float(fracture["G_c"]) * f_e
+        elif fracture:
+            err_f = item("E100", field="fracture",
+                         detail="fracture 는 {\"G_c\": >0} 또는 {\"G_Ic\": >0, \"G_IIc\": >0, "
+                                "\"eta\": >0(선택)} 이어야 합니다 (SI: J/m², SI_mm: N/mm)")
+        if err_f is not None:
+            return ENV.build(data=None, errors=[err_f], warnings=warnings, payload=payload,
+                             unit_system=si.unit_system, include_debug=include_debug, t0=t0)
 
     qbars = [MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
              for p_ in si.plies]
     th = list(si.thicknesses)
+    angles_all = [p_.angle_deg for p_ in si.plies]
     z = ABD.z_coordinates(th)
     A, B, D, _z, h = _abd_of_plies(si.plies)
     try:
@@ -2330,14 +2436,39 @@ def run_free_edge_delamination(payload, loads=None, fracture=None,
             },
             "dominant_driver": FE.dominant_driver(drive, h, stress_scale),
         }
-        if g_c is not None:
-            ec = FE.onset_strain(g_c, h, d_e) if g is not None else None
-            row["onset_strain"] = ec
+        # 혼합모드 (§19.9) — 거울 분할이면 대칭 논증으로 Mode II 가 정확히 0 이다
+        mirror = FE.is_mirror_split(angles_all, th, k)
+        row["mode_mix"] = {
+            "mode_II_fraction": 0.0 if mirror else None,
+            "basis": "mirror_symmetry" if mirror else "unknown",
+            "note": ("두 부분적층이 거울상이라 상대 미끄러짐이 0 — 순수 Mode I 이다(대칭 논증)"
+                     if mirror else
+                     "부분적층 강성이 달라 Mode II 성분이 있다. 분할에는 3D/수치 해석이 필요해 "
+                     "이 도구는 G_Ic~G_IIc 범위로만 답한다"),
+        }
+        if g_c is not None or g_ic is not None:
+            # 인성이 주어지면 키 모양을 일정하게 유지한다 (모델 무효면 명시적 null)
+            row["onset_strain"] = None
+            row["margin"] = None
+        if g is not None and (g_c is not None or g_ic is not None):
+            if g_c is not None:
+                ec = FE.onset_strain(g_c, h, d_e)
+                row["onset_strain"] = ec
+            elif mirror:
+                gc_eff = FE.benzeggagh_kenane(g_ic, g_iic, 0.0, bk_eta)   # = G_Ic
+                row["toughness_used"] = gc_eff * f["energy_area"]
+                row["onset_strain"] = FE.onset_strain(gc_eff, h, d_e)
+            else:
+                lo = FE.onset_strain(g_ic, h, d_e)      # 순수 Mode I — 보수
+                hi = FE.onset_strain(g_iic, h, d_e)     # 순수 Mode II — 낙관
+                row["onset_strain"] = lo                # 보수값을 대표로 쓴다
+                row["onset_strain_range"] = {"conservative_mode_I": lo, "optimistic_mode_II": hi}
+            ec = row.get("onset_strain")
             row["margin"] = (ec / abs(eps_x)) if (ec is not None and eps_x != 0.0) else None
         interfaces.append(row)
 
     invalid = [r["interface"] for r in interfaces if not r["model_valid"]]
-    if g_c is not None:
+    if g_c is not None or g_ic is not None:
         ranked = [r for r in interfaces if r.get("onset_strain") is not None]
         governing = min(ranked, key=lambda r: (r["onset_strain"], r["interface"])) if ranked else None
     else:
@@ -2365,15 +2496,26 @@ def run_free_edge_delamination(payload, loads=None, fracture=None,
     }
 
     warn = list(warnings)
-    if g_c is None:
+    if g_c is None and g_ic is None:
         warn.append(item("W120", field="fracture",
-                         detail="층간 파괴인성 G_c 가 없어 개시 변형률·여유율을 내지 못했다. "
-                                "G(에너지방출률) 순위만 참고할 것 — fracture={\"G_c\": ...} 로 주면 "
-                                "개시 판정을 한다"))
-    warn.append(item("W130", field="mode_mixity",
-                     detail="O'Brien 의 G 는 **총** 에너지방출률이다 — G_I/G_II 혼합모드 분리를 하지 "
-                            "않는다. 층간 인성이 모드에 크게 의존하므로(보통 G_Ic ≪ G_IIc) "
-                            "보수적으로 G_Ic 를 쓰거나 혼합모드 기준을 별도로 적용할 것"))
+                         detail="층간 파괴인성이 없어 개시 변형률·여유율을 내지 못했다. G(에너지방출률) "
+                                "순위만 참고할 것 — fracture={\"G_Ic\":…, \"G_IIc\":…} 를 주면 "
+                                "혼합모드(Benzeggagh–Kenane)로, {\"G_c\":…} 를 주면 단일 인성으로 판정한다"))
+    if g_c is not None:
+        warn.append(item("W130", field="fracture.G_c",
+                         detail="단일 G_c 를 썼다 — 층간 인성은 모드 의존이 크다(보통 G_Ic ≪ G_IIc). "
+                                "G_Ic·G_IIc 를 주면 계면별로 혼합모드를 판정한다"))
+    unknown_mix = [r["interface"] for r in interfaces if r["mode_mix"]["basis"] == "unknown"]
+    if unknown_mix and g_ic is not None:
+        warn.append(item("W130", field="mode_mix",
+                         detail=f"계면 {unknown_mix} 는 부분적층이 거울상이 아니라 Mode I/II 분할을 "
+                                f"정할 수 없다(3D/수치 해석 필요). onset_strain 은 **보수적인 순수 "
+                                f"Mode I 값**이고 onset_strain_range 가 실제 범위다"))
+    mirror_ifs = [r["interface"] for r in interfaces if r["mode_mix"]["basis"] == "mirror_symmetry"]
+    if mirror_ifs:
+        warn.append(item("W120", field="mode_mix",
+                         detail=f"계면 {mirror_ifs} 는 두 부분적층이 거울상이라 대칭 논증으로 "
+                                f"**순수 Mode I** 이다 — 여기서 G_Ic 를 쓰는 것은 보수가 아니라 정확하다"))
     warn.append(item("W130", field="driving",
                      detail="구동력은 경계층 평형에서 나온 크기 규모 지표다. 실제 자유 가장자리 "
                             "응력은 계면에서 특이점을 갖는 3D 탄성 문제라 개시 계면이 다를 수 있다"))
@@ -2399,7 +2541,8 @@ def run_free_edge_delamination(payload, loads=None, fracture=None,
     extra = [
         "O'Brien(1985) 가장자리 박리 ERR — 대칭 적층·균일 축인장·정상상태(박리 길이 무관) 가정",
         "E* 는 부분적층이 자유단에서 굽는 연화까지 포함한 막 유효탄성계수로 계산한다",
-        "혼합모드 분리 없음 — 총 G 만 준다",
+        "혼합모드: 거울 분할 계면은 대칭 논증으로 순수 Mode I(정확). 그 외는 분할 불가라 "
+        "G_Ic~G_IIc 범위로 답한다 — Suo–Hutchinson 위상각은 수치표라 미탑재(§17.7.3 원칙)",
         *_source_assumptions(si),
     ]
     hash_payload = {"laminate": payload, "loads": loads, "fracture": fracture}

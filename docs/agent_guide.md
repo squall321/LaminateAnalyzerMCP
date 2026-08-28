@@ -297,3 +297,19 @@ N_cr 이 2.5배 달라진다. **단 고정단 좌굴값은 1항 Ritz 상계라 +
 
 압축 하중을 받으면 **강도만 보고하지 말 것.** 열해석에서 "휨 없음"이 나오면 **구속 조건을 확인할 것.**
 
+## 15. 열잔류와 혼합모드 (v0.12.0)
+
+**경화 냉각 잔류를 빼면 파손·피로가 통째로 비보수다.**
+`run_progressive_failure`·`estimate_fatigue_life` 에 `delta_T` 를 반드시 넘겨라.
+실측 [0/90]s CFRP: ΔT=−150 K 에서 **FPF 하중이 81% 낮아지고**, 피로 수명은
+1.23e8 → 1 회로 무너진다(90° 층 횡인장 잔류가 Yt 여유를 거의 다 먹는다).
+CTE 가 있는데 `delta_T` 를 안 주면 W130 이 뜬다 — 그 경고를 무시하지 말 것.
+`first_ply_failure_R = 0` 은 **기계 하중 없이 잔류만으로 이미 파손**이라는 뜻이다.
+
+**박리 인성은 모드를 갈라 줘야 정확하다.**
+`assess_free_edge_delamination` 의 `fracture` 에 `{G_Ic, G_IIc}` 를 주면 계면별로 판정한다.
+- `mode_mix.basis == "mirror_symmetry"` → 두 부분적층이 거울상이라 **순수 Mode I** 이다.
+  여기서 G_Ic 를 쓰는 것은 보수가 아니라 **정확**하다.
+- `basis == "unknown"` → 분할에 3D 해석이 필요하다. `onset_strain` 은 **보수적인 Mode I 값**이고
+  `onset_strain_range` 가 실제 범위다. 사용자에게 범위로 보고할 것.
+

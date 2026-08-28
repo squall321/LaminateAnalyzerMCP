@@ -257,7 +257,8 @@ def compute_natural_frequencies(laminate: dict, panel: dict, n_modes: int = 5,
 
 
 @mcp.tool()
-def run_progressive_failure(laminate: dict, loads: dict, discount: float = 0.1) -> dict:
+def run_progressive_failure(laminate: dict, loads: dict, discount: float = 0.1,
+                            delta_T: float | None = None) -> dict:
     """진행성 파손(ply discount) — FPF 이후 강성 저하를 반복해 한계하중까지 추적한다.
 
     loads = {"N":[...], "M":[...]} 하중 패턴. 반환: events(사건별 ply·모드·R),
@@ -265,7 +266,8 @@ def run_progressive_failure(laminate: dict, loads: dict, discount: float = 0.1) 
     사건별 유효 Ex 저하 곡선, 종료 사유. discount = 파손 ply 강성 잔존율 η (기본 0.1).
     strength 없는 ply는 탄성 유지. FPF 상세(위치·양기준)는 recover_ply_stresses 사용.
     """
-    return _guarded(PIPE.run_progressive, laminate, loads=loads, discount=discount)
+    return _guarded(PIPE.run_progressive, laminate, loads=loads, discount=discount,
+                    delta_t=delta_T)
 
 
 @mcp.tool()
@@ -284,7 +286,7 @@ def compute_interlaminar_stresses(laminate: dict, shear: dict, detail: str = "au
 
 @mcp.tool()
 def estimate_fatigue_life(laminate: dict, loads_max: dict, loads_min: dict | None = None,
-                          detail: str = "auto") -> dict:
+                          detail: str = "auto", delta_T: float | None = None) -> dict:
     """하중 사이클에 대한 ply별 피로 수명(반복 횟수) 추정.
 
     loads_max/loads_min = {"N":[...], "M":[...]} (단위 폭당). loads_min 생략 시 0 → 영-인장(R=0).
@@ -296,7 +298,7 @@ def estimate_fatigue_life(laminate: dict, loads_max: dict, loads_min: dict | Non
     strength/fatigue 없는 ply는 제외되며 W120으로 알린다(임계 ply가 빠지면 과대평가).
     """
     return _guarded(PIPE.run_fatigue, laminate, loads_max=loads_max, loads_min=loads_min,
-                    detail=detail)
+                    detail=detail, delta_t=delta_T)
 
 
 @mcp.tool()

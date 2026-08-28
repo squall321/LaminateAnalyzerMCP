@@ -177,7 +177,7 @@ def test_warnings_and_errors():
     good = lam((0.0, 90.0, 90.0, 0.0))
     no_gc = srv.assess_free_edge_delamination(good, loads={"N": [150.0, 0.0, 0.0]})
     assert any(w["code"] == "W120" and "G_c" in w["message"] for w in no_gc["warnings"])
-    assert any(w["code"] == "W130" and "혼합모드" in w["message"] for w in no_gc["warnings"])
+    assert any(w["code"] == "W120" and "혼합모드" in w["message"] for w in no_gc["warnings"])
     # 굽힘이 걸리면 축인장 전제를 벗어난다
     bent = srv.assess_free_edge_delamination(good, loads={"N": [150.0, 0.0, 0.0],
                                                           "M": [1.0, 0.0, 0.0]})
@@ -248,3 +248,79 @@ def test_reference_case_free_edge():
     assert outer["dominant_driver"] == e["outer_interface_dominant_driver"]
     assert outer["G"] == pytest.approx(
         [r for r in d["interfaces"] if r["interface"] == 3][0]["G"], rel=1e-12)
+
+
+# ── §19.9 혼합모드 분리 ─────────────────────────────────────────────────────
+
+def test_mirror_split_only_at_symmetric_midplane():
+    """거울 분할은 대칭 적층의 중앙면에서만 성립한다."""
+    for angles, expect in (((0.0, 90.0, 90.0, 0.0), [2]),
+                           ((30.0, -30.0, 90.0, 90.0, -30.0, 30.0), [3]),
+                           ((0.0, 0.0, 0.0, 90.0), [])):
+        th = [0.125] * len(angles)
+        got = [k for k in range(1, len(angles)) if FE.is_mirror_split(list(angles), th, k)]
+        assert got == expect
+
+
+def test_mirror_split_means_equal_sublaminate_stiffness():
+    """거울 분할이면 두 부분적층 축강성이 정확히 같다 — 상대 미끄러짐 0 의 근거."""
+    qb, th = _si((30.0, -30.0, 90.0, 90.0, -30.0, 30.0))
+    e1, _ = FE.sublaminate_axial_modulus(qb, th, 0, 3)
+    e2, _ = FE.sublaminate_axial_modulus(qb, th, 3, 6)
+    assert e1 == pytest.approx(e2, rel=1e-12)
+
+
+def test_benzeggagh_kenane_limits():
+    """B-K 는 Mode II 비 0 에서 G_Ic, 1 에서 G_IIc 로 정확히 환원된다."""
+    assert FE.benzeggagh_kenane(0.1, 0.5, 0.0) == pytest.approx(0.1, rel=1e-15)
+    assert FE.benzeggagh_kenane(0.1, 0.5, 1.0) == pytest.approx(0.5, rel=1e-15)
+    mid = FE.benzeggagh_kenane(0.1, 0.5, 0.5, eta=2.0)
+    assert mid == pytest.approx(0.1 + 0.4 * 0.25, rel=1e-15)
+    assert 0.1 < mid < 0.5
+
+
+def test_mode_mix_reported_per_interface():
+    """중앙면은 순수 Mode I(정확), 그 외는 범위로 답한다."""
+    env = srv.assess_free_edge_delamination(lam((30.0, -30.0, 90.0, 90.0, -30.0, 30.0)),
+                                            loads={"N": [150.0, 0.0, 0.0]},
+                                            fracture={"G_Ic": 0.10, "G_IIc": 0.50})
+    d = env["data"]
+    mid = [r for r in d["interfaces"] if r["interface"] == 3][0]
+    assert mid["mode_mix"]["mode_II_fraction"] == 0.0
+    assert mid["mode_mix"]["basis"] == "mirror_symmetry"
+    assert "onset_strain_range" not in mid          # 분할이 확정이라 범위가 없다
+    off = [r for r in d["interfaces"] if r["interface"] == 2][0]
+    assert off["mode_mix"]["basis"] == "unknown"
+    rng = off["onset_strain_range"]
+    # 대표값은 보수적인 Mode I 쪽이어야 한다
+    assert off["onset_strain"] == pytest.approx(rng["conservative_mode_I"], rel=1e-12)
+    assert rng["optimistic_mode_II"] > rng["conservative_mode_I"]
+    assert any(w["code"] == "W130" and "분할을 정할 수 없다" in w["message"] for w in env["warnings"])
+    assert any(w["code"] == "W120" and "순수 Mode I" in w["message"] for w in env["warnings"])
+
+
+def test_mode_i_toughness_matches_single_gc_path():
+    """거울 계면에서 {G_Ic, G_IIc} 는 {G_c: G_Ic} 와 같은 답을 준다 (B-K 환원)."""
+    payload = lam((0.0, 90.0, 90.0, 0.0))
+    loads = {"N": [150.0, 0.0, 0.0]}
+    a = srv.assess_free_edge_delamination(payload, loads=loads,
+                                          fracture={"G_Ic": 0.10, "G_IIc": 0.50})["data"]
+    b = srv.assess_free_edge_delamination(payload, loads=loads,
+                                          fracture={"G_c": 0.10})["data"]
+    mid_a = [r for r in a["interfaces"] if r["interface"] == 2][0]
+    mid_b = [r for r in b["interfaces"] if r["interface"] == 2][0]
+    assert mid_a["onset_strain"] == pytest.approx(mid_b["onset_strain"], rel=1e-12)
+
+
+def test_fracture_input_validation():
+    payload = lam((0.0, 90.0, 90.0, 0.0))
+    loads = {"N": [150.0, 0.0, 0.0]}
+    bad = [{"G_Ic": 0.5, "G_IIc": 0.1},      # 뒤바뀐 값
+           {"typo": 1.0},                     # 미지 키
+           {"G_Ic": 0.1},                     # G_IIc 누락
+           {"G_Ic": 0.1, "G_IIc": 0.5, "eta": -1.0}]
+    for fr in bad:
+        assert srv.assess_free_edge_delamination(
+            payload, loads=loads, fracture=fr)["errors"][0]["code"] == "E100"
+    assert srv.assess_free_edge_delamination(
+        payload, loads=loads, fracture={"G_c": 0.1})["errors"] == []

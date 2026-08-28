@@ -85,3 +85,48 @@ def assess_ply(sigma_12: np.ndarray, strength: tuple[float, float, float, float,
     return {"tsai_wu": tw, "max_stress": ms,
             "governing_mode": ms["mode"],
             "fails": bool(tw.get("strength_ratio") is not None and tw["strength_ratio"] <= 1.0)}
+
+
+def tsai_wu_with_offset(sigma_mech: np.ndarray, sigma_res: np.ndarray,
+                        Xt: float, Xc: float, Yt: float, Yc: float, S: float) -> dict:
+    """잔류응력이 있을 때의 Tsai-Wu 강도비 (계획서 §19.10).
+
+    잔류응력(열·흡습)은 **하중 배수 R 과 함께 커지지 않는다** — σ(R) = R·σ_mech + σ_res 다.
+    비례하중 가정의 tsai_wu 를 그대로 쓰면 잔류분까지 R 배 되어 답이 틀린다.
+    파손면 도달 조건을 R 의 2차식으로 풀어 정확히 처리한다::
+
+        a·R² + b·R + c = 1
+        a = F11σm1² + F22σm2² + F66τm² + 2F12σm1σm2
+        b = F1σm1 + F2σm2 + 2(F11σm1σr1 + F22σm2σr2 + F66τmτr) + 2F12(σm1σr2 + σm2σr1)
+        c = F1σr1 + F2σr2 + F11σr1² + F22σr2² + F66τr² + 2F12σr1σr2
+
+    c ≥ 1 이면 **하중 없이 이미 파손**이다(잔류만으로 파손면 도달) — R = 0 을 준다.
+    σ_res = 0 이면 기존 tsai_wu 와 정확히 일치한다.
+    """
+    m1, m2, mt = float(sigma_mech[0]), float(sigma_mech[1]), float(sigma_mech[2])
+    r1, r2, rt = float(sigma_res[0]), float(sigma_res[1]), float(sigma_res[2])
+    F1 = 1.0 / Xt - 1.0 / Xc
+    F2 = 1.0 / Yt - 1.0 / Yc
+    F11 = 1.0 / (Xt * Xc)
+    F22 = 1.0 / (Yt * Yc)
+    F66 = 1.0 / (S * S)
+    F12 = -0.5 * math.sqrt(F11 * F22)
+
+    a = F11 * m1 * m1 + F22 * m2 * m2 + F66 * mt * mt + 2.0 * F12 * m1 * m2
+    b = (F1 * m1 + F2 * m2
+         + 2.0 * (F11 * m1 * r1 + F22 * m2 * r2 + F66 * mt * rt)
+         + 2.0 * F12 * (m1 * r2 + m2 * r1))
+    c = (F1 * r1 + F2 * r2
+         + F11 * r1 * r1 + F22 * r2 * r2 + F66 * rt * rt + 2.0 * F12 * r1 * r2)
+    rem = 1.0 - c
+    if rem <= 0.0:
+        return {"criterion": "tsai_wu", "strength_ratio": 0.0, "failure_index": None,
+                "note": "잔류응력만으로 이미 파손면에 도달했다 (하중 배수 0)"}
+    if a <= 1e-300:
+        if b <= 0.0:
+            return {"criterion": "tsai_wu", "strength_ratio": None, "failure_index": 0.0,
+                    "note": "무응력 또는 파손면 도달 불가 방향"}
+        return {"criterion": "tsai_wu", "strength_ratio": rem / b, "failure_index": b / rem}
+    R = (-b + math.sqrt(b * b + 4.0 * a * rem)) / (2.0 * a)
+    return {"criterion": "tsai_wu", "strength_ratio": R,
+            "failure_index": 1.0 / R if R > 0 else None}

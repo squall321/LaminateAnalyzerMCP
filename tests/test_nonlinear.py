@@ -353,3 +353,98 @@ def test_postbuckling_tool_errors():
                                     load_ratio=float("nan"))["errors"][0]["code"] == "E100"
     assert srv.compute_postbuckling(sym, panel={"Lx": 0.0, "Ly": 1.0},
                                     applied_Nx=1.0)["errors"][0]["code"] == "E100"
+
+
+# ── 독립 오라클: 정사각 판 폐형해 (계획서 §8 다중경로 검증) ─────────────────
+#
+# 격자 스캔 + 뉴턴과 **완전히 다른 경로**로 유도된 폐형해다. 면내 자유도를 c₁,c₂만
+# 남기고 d₁ = κxκy/4 로 고정하면 에너지가
+#     Π/S = ½κᵀD*κ − M*·κ + Q·κx²κy²,  D* = D − BA⁻¹B, M* = M_f − BA⁻¹N_f,
+#     Q = (A11·Ly⁴ + A22·Lx⁴)/5760        (A12는 소거 후 사라진다)
+# 로 축소되고, 대칭 크로스플라이 정사각에서는 분기가 pitchfork로 인수분해된다.
+#
+# **정사각 전용이다.** d₁ = κxκy/4 는 정사각에서만 3자유도 최소화의 최적값과 일치한다
+# (아래 test_closed_form_oracle_is_square_only 가 그 경계를 못박는다). 직사각에
+# 잘못 적용하면 임계 크기가 50~65% 틀린다.
+
+
+def _dstar_mstar(A, B, D, N_f, M_f):
+    A_inv = np.linalg.inv(A)
+    return D - B @ A_inv @ B, M_f - B @ A_inv @ N_f
+
+
+def _closed_form_landmarks(A, B, D, N_f, M_f):
+    """정사각 대칭 크로스플라이의 폐형해 랜드마크."""
+    Ds, Ms = _dstar_mstar(A, B, D, N_f, M_f)
+    return {
+        "kappa_linear": Ms[0] / (Ds[0, 0] - Ds[0, 1]),          # L→0 안장
+        "kappa_crit": Ms[0] / (2 * Ds[0, 0]),                   # 분기점
+        "kappa_inf": Ms[0] / Ds[0, 0],                          # L→∞ 원통
+        "L_crit": (5760 * Ds[0, 0] ** 2 * (Ds[0, 0] + Ds[0, 1])
+                   / (A[0, 0] * Ms[0] ** 2)) ** 0.25,
+    }
+
+
+@pytest.mark.parametrize("dT,t", [(-150.0, 0.125e-3), (-150.0, 0.25e-3),
+                                  (-100.0, 0.125e-3), (-250.0, 0.25e-3)])
+def test_closed_form_oracle_critical_size(dT, t):
+    """수치 연속추적으로 구한 임계 판 크기가 폐형해와 일치한다 (독립 경로)."""
+    A, B, D, N_f, M_f = hyer_setup((0.0, 90.0), dT=dT, t=t)
+    numeric = NL.critical_scale(A, B, D, N_f, M_f, 0.1, 0.1)["lx"]
+    assert numeric == pytest.approx(_closed_form_landmarks(A, B, D, N_f, M_f)["L_crit"],
+                                    rel=1e-8)
+
+
+def test_closed_form_oracle_curvature_landmarks():
+    """κ_lin(L→0)·κ_c(분기)·κ_∞(L→∞) 세 랜드마크가 수치해와 일치한다.
+
+    κ_c = κ_∞/2 는 정확한 항등식이다 — 설계 판단에 쓸 수 있는 기억할 만한 사실.
+    """
+    A, B, D, N_f, M_f = hyer_setup((0.0, 90.0))
+    lm = _closed_form_landmarks(A, B, D, N_f, M_f)
+    assert lm["kappa_crit"] == pytest.approx(lm["kappa_inf"] / 2, rel=1e-12)
+    # L→0: 선형 CLT 6×6 해와 일치
+    assert NL.linear_curvatures(A, B, D, N_f, M_f)[0] == pytest.approx(
+        lm["kappa_linear"], rel=1e-12)
+    # L→∞: 큰 판의 안정 원통해
+    en = NL.HyerEnergy(A, B, D, N_f, M_f, 1.0, 1.0)
+    kx, ky = NL.linear_curvatures(A, B, D, N_f, M_f)
+    stable = [s for s in NL.find_equilibria(en, NL.search_span(en, kx, ky)) if s["stable"]]
+    assert stable[0]["a"] == pytest.approx(lm["kappa_inf"], rel=1e-5)
+    # 임계 크기에서는 세 해가 한 점으로 모인다 (pitchfork)
+    en_c = NL.HyerEnergy(A, B, D, N_f, M_f, lm["L_crit"], lm["L_crit"])
+    for s in NL.find_equilibria(en_c, NL.search_span(en_c, kx, ky)):
+        assert s["a"] == pytest.approx(lm["kappa_crit"], rel=1e-3)
+
+
+def test_closed_form_oracle_is_square_only():
+    """폐형해는 정사각 전용 — 직사각에 쓰면 크게 틀린다는 경계를 못박는다.
+
+    d₁ = κxκy/4 고정은 정사각에서만 3자유도 최소화의 최적값과 같다. 직사각에서는
+    최적 d₁이 그 2배 가까이 되고(면내 에너지를 더 낮춘다), 폐형해 임계 크기는 50%↑
+    빗나간다. 미래 세션이 이 폐형해를 일반식으로 오해해 채택하는 것을 막는 테스트다.
+    """
+    A, B, D, N_f, M_f = hyer_setup((0.0, 90.0))
+    # 정사각: 최적 d₁ == ab/4
+    sq = NL.HyerEnergy(A, B, D, N_f, M_f, 0.1, 0.1)
+    for a, b in ((3.0, -3.0), (5.0, -2.0)):
+        assert sq.membrane_dofs(a, b)[2] == pytest.approx(a * b / 4.0, rel=1e-12)
+    # 직사각: 최적 d₁ != ab/4
+    rect = NL.HyerEnergy(A, B, D, N_f, M_f, 0.2, 0.05)
+    assert rect.membrane_dofs(3.0, -3.0)[2] != pytest.approx(3.0 * -3.0 / 4.0, rel=1e-2)
+    # 그리고 임계 크기 폐형해도 직사각에서는 빗나간다
+    Ds, Ms = _dstar_mstar(A, B, D, N_f, M_f)
+    q = (A[0, 0] * 0.05 ** 4 + A[1, 1] * 0.2 ** 4) / 5760.0
+    q_crit = 2 * Ds[0, 0] ** 2 * (Ds[0, 0] + Ds[0, 1]) / Ms[0] ** 2
+    numeric = NL.critical_scale(A, B, D, N_f, M_f, 0.2, 0.05)["scale"]
+    assert abs((q_crit / q) ** 0.25 - numeric) / numeric > 0.3
+
+
+def test_critical_size_governed_by_short_side():
+    """직사각 판의 분기는 짧은 변이 지배한다 (폐형해가 못 잡는 실제 거동)."""
+    A, B, D, N_f, M_f = hyer_setup((0.0, 90.0))
+    short_sides = []
+    for lx in (0.2, 0.15):
+        c = NL.critical_scale(A, B, D, N_f, M_f, lx, 0.05)
+        short_sides.append(c["ly"])
+    assert short_sides[0] == pytest.approx(short_sides[1], rel=1e-2)

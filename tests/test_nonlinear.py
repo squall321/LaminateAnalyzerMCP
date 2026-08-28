@@ -448,3 +448,42 @@ def test_critical_size_governed_by_short_side():
         c = NL.critical_scale(A, B, D, N_f, M_f, lx, 0.05)
         short_sides.append(c["ly"])
     assert short_sides[0] == pytest.approx(short_sides[1], rel=1e-2)
+
+
+# ── 기준 케이스(few-shot)가 실제 엔진과 일치하는가 ──────────────────────────
+
+def test_reference_case_bistable_cross_ply():
+    """R11: 폐형해 랜드마크가 compute_bistable_shapes 결과와 맞는다."""
+    c = srv.get_reference_cases("bistable_cross_ply")
+    env = srv.compute_bistable_shapes(c["input"]["laminate"], panel=c["input"]["panel"],
+                                      delta_T=c["input"]["delta_T"])
+    d, e, tol = env["data"], c["expected"], c["tolerance"]
+    assert env["errors"] == []
+    assert d["bistable"] is e["bistable"] and d["stable_count"] == e["stable_count"]
+    assert d["critical_panel"]["Lx"] == pytest.approx(e["critical_panel_Lx_mm"],
+                                                     rel=tol["critical_panel_Lx_mm"])
+    stable = [x for x in d["equilibria"] if x["stable"]]
+    assert len(stable) == 2
+    assert all(x["shape"] == "cylindrical" for x in stable)
+    # 거울쌍 (κx,κy) → (−κy,−κx)
+    assert stable[0]["kappa_x"] == pytest.approx(-stable[1]["kappa_y"], rel=1e-9)
+    # L→∞ 극한값과 유한 판 값의 근접
+    assert stable[0]["kappa_x"] == pytest.approx(e["kappa_inf_per_mm"],
+                                                rel=tol["kappa_inf_per_mm"])
+    assert e["kappa_crit_per_mm"] == pytest.approx(e["kappa_inf_per_mm"] / 2, rel=1e-12)
+
+
+def test_reference_case_large_deflection():
+    """R13: 1항 Navier 폐형해와 immovable/movable β비가 맞는다."""
+    c = srv.get_reference_cases("large_deflection_isotropic")
+    i, e, tol = c["input"], c["expected"], c["tolerance"]
+    env = srv.compute_large_deflection(i["laminate"], panel=i["panel"], pressure=i["pressure"],
+                                       edge_condition=i["edge_condition"])
+    d = env["data"]
+    assert env["errors"] == []
+    assert d["w_center_linear"] == pytest.approx(e["w_center_linear_mm"],
+                                                rel=tol["w_center_linear_mm"])
+    assert d["w_center"] < d["w_center_linear"]
+    imm = srv.compute_large_deflection(i["laminate"], panel=i["panel"], pressure=i["pressure"],
+                                       edge_condition="immovable")["data"]
+    assert imm["w_center"] < d["w_center"]

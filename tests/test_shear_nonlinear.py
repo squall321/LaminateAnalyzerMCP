@@ -186,3 +186,17 @@ def test_tool_is_deterministic():
     b = srv.solve_nonlinear_shear_response(lam(), loads={"N": [50.0, 0.0, 0.0]})
     assert a["data"] == b["data"]
     assert a["metadata"]["payload_hash"] == b["metadata"]["payload_hash"]
+
+
+def test_reference_case_pm45():
+    """R12: [±45] 폐형해 τ12·할선비·Gxy 불변이 엔진과 일치한다."""
+    c = srv.get_reference_cases("pm45_shear_nonlinear")
+    i, e, tol = c["input"], c["expected"], c["tolerance"]
+    env = srv.solve_nonlinear_shear_response(i["laminate"], loads=i["loads"])
+    d = env["data"]
+    assert env["errors"] == []
+    for p in d["per_ply"]:
+        assert p["tau12"] == pytest.approx(e["per_ply_tau12_MPa"], rel=tol["per_ply_tau12_MPa"])
+        assert p["secant_ratio"] == pytest.approx(e["secant_ratio"], rel=tol["secant_ratio"])
+    assert d["softening"]["Gxy_secant_over_linear"] == pytest.approx(
+        e["Gxy_secant_over_linear"], rel=tol["Gxy_secant_over_linear"])

@@ -88,3 +88,34 @@ def lamina_from_constituents(fiber: dict, matrix: dict, v_f: float,
     if r_f is not None and r_m is not None:
         out["rho"] = voigt(float(r_f), float(r_m), v_f)
     return out
+
+
+def patterned_layer(components: list[tuple[float, float, float, float | None, float | None]]
+                    ) -> dict:
+    """방향성 패턴층(동박 트레이스 등) → 직교이방 물성 (계획서 §19.21).
+
+    components: [(f, E, nu, alpha|None, rho|None)] — homogenize_voigt 와 같은 형식.
+    **평행 스트라이프 가정**이라 1축이 스트라이프 방향이다:
+
+        E1 = Σf·E            (스트라이프 방향 — 등변형, 정확)
+        E2 = 1/Σ(f/E)        (가로 방향 — 등응력, 두 상이 모두 층 두께를 관통할 때 정확)
+        G12 = 1/Σ(f/G),  ν12 = Σf·ν
+        α1 = Σf·E·α / Σf·E                    (등변형 강성 가중)
+        α2 = Σf·(1+ν)·α − α1·ν12              (Schapery)
+
+    기존 homogenize_layer 는 **등방 Voigt** 라 방향이 사라진다 — 동박 패턴 방향만 다른
+    스택업 A/B 에 서버가 바이트 동일한 답을 주고 있었다(실측). 등방 극한(전 상의 E·ν·α 가
+    같을 때)에서는 E1 = E2 로 그 결과와 정확히 일치한다.
+    """
+    e1 = sum(f * e for f, e, _nu, _a, _r in components)
+    e2 = 1.0 / sum(f / e for f, e, _nu, _a, _r in components)
+    nu12 = sum(f * nu for _f, _e, nu, _a, _r in components for f in (_f,))
+    g12 = 1.0 / sum(f / (e / (2.0 * (1.0 + nu))) for f, e, nu, _a, _r in components)
+    out: dict = {"E1": e1, "E2": e2, "G12": g12, "nu12": nu12}
+    if all(a is not None for _f, _e, _nu, a, _r in components):
+        out["alpha1"] = sum(f * e * a for f, e, _nu, a, _r in components) / e1
+        out["alpha2"] = (sum(f * (1.0 + nu) * a for f, _e, nu, a, _r in components)
+                         - out["alpha1"] * nu12)
+    if all(r is not None for _f, _e, _nu, _a, r in components):
+        out["rho"] = sum(f * r for f, _e, _nu, _a, r in components)
+    return out

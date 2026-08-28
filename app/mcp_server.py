@@ -559,6 +559,28 @@ def estimate_spectrum_life(laminate: dict, blocks: list, delta_T: float | None =
 
 
 @mcp.tool()
+def homogenize_patterned_layer(components: list[dict]) -> dict:
+    """방향성 패턴층(동박 트레이스 등) → **직교이방** 물성. 패턴 방향을 살린다.
+
+    homogenize_layer 는 등방 Voigt 라 방향이 사라진다 — 동박 패턴 방향만 다른 스택업
+    A/B 에 서버가 **바이트 동일한 답**을 주고 있었다(실측). PCB 의 실린더/새들 형상은
+    바로 그 방향 비대칭이 만드는 것이라 원리적으로 나올 수 없었다.
+    평행 스트라이프 가정: E1=Σf·E(스트라이프 방향, 등변형·정확), E2=1/Σ(f/E)(가로, 등응력),
+    α1 은 강성 가중, α2 는 Schapery. 동박 60% 실측으로 E1/E2 = 8.5배, α2/α1 = 2.24배.
+    components 형식은 homogenize_layer 와 같다: [{"material": isotropic, "volume_fraction": f}].
+    **반환 material 을 laminae 에 넣고 angle_deg 를 트레이스 방향으로 설정**하라 —
+    그것이 패턴 방향이 휨 형상에 반영되는 경로다.
+    등방 극한(전 상 동일 물성)에서는 homogenize_layer 와 정확히 일치한다.
+    단위계 무관 — 출력 단위는 입력과 동일.
+    """
+    try:
+        return PIPE.run_patterned_layer(components)
+    except Exception as e:  # noqa: BLE001
+        return ENV.build(data=None, errors=[item("E501", detail=type(e).__name__)],
+                         warnings=[], payload={"components": components if isinstance(components, list) else []})
+
+
+@mcp.tool()
 def get_reference_cases(case_id: str | None = None) -> dict:
     """내장 기준 케이스를 반환한다. case_id 생략 시 목록.
 

@@ -730,7 +730,9 @@ def run_homogenize(components, include_debug: bool = False) -> dict:
         "scope": ("**동일 평면을 함께 잇는 혼합층 전용**이다(동박/수지처럼 두 상이 모두 면내로 "
                   "이어진 경우). 섬유/수지처럼 한 상이 방향성을 갖는 UD ply 에는 쓰면 안 된다 — "
                   "횡방향이 직렬 결합이라 E2·G12·α2 가 크게 틀린다. UD ply 물성은 "
-                  "derive_lamina_from_constituents 를 쓸 것"),
+                  "derive_lamina_from_constituents 를, **방향성 동박 패턴층은 "
+                  "homogenize_patterned_layer** 를 쓸 것 — 이 도구는 등방만 돌려주므로 "
+                  "패턴 방향이 사라진다"),
     }
     # 역게이트 — 이 도구는 **동일 평면을 함께 잇는 혼합층**(동박/수지) 전용이다.
     # 섬유/수지처럼 한 상이 방향성을 가지면 횡방향은 직렬 결합이라 Voigt 가 크게 틀린다.
@@ -3632,3 +3634,78 @@ def run_load_spectrum(payload, blocks, delta_t=None, include_debug: bool = False
                                         "블록별 수명은 estimate_fatigue_life 와 동일한 경로로 계산",
                                         *_source_assumptions(si)],
                      include_debug=include_debug, t0=t0)
+
+
+def run_patterned_layer(components, include_debug: bool = False) -> dict:
+    """방향성 패턴층 → 직교이방 물성 (homogenize_patterned_layer, §19.21).
+
+    단위계 무관 — 출력 단위는 입력과 동일하다 (homogenize_layer 와 같은 관례).
+    """
+    from app.solver import micromechanics as MM
+    t0 = time.perf_counter()
+    hash_payload = {"components": components if isinstance(components, list) else []}
+    err = None
+    parsed = []
+    if not isinstance(components, list) or len(components) < 2:
+        err = item("E100", field="components",
+                   detail="components는 2개 이상 {material(isotropic), volume_fraction} 목록이어야 합니다")
+    else:
+        for i, c in enumerate(components):
+            m = c.get("material") if isinstance(c, dict) else None
+            fv = c.get("volume_fraction") if isinstance(c, dict) else None
+            ok = (isinstance(m, dict) and m.get("type") == "isotropic"
+                  and _num_ok(m.get("E")) and isinstance(m.get("nu"), (int, float))
+                  and not isinstance(m.get("nu"), bool) and -1.0 < m["nu"] < 0.5
+                  and _num_ok(fv) and fv <= 1.0)
+            if not ok:
+                err = item("E100", field=f"components[{i}]",
+                           detail=f"components[{i}]는 {{material: {{type:'isotropic', E>0, "
+                                  f"nu∈(-1,0.5)}}, volume_fraction∈(0,1]}} 이어야 합니다")
+                break
+            parsed.append((float(fv), float(m["E"]), float(m["nu"]),
+                           float(m["alpha"]) if _num_ok(m.get("alpha"), positive=False) else None,
+                           float(m["rho"]) if _num_ok(m.get("rho")) else None))
+    if err is None and abs(sum(p_[0] for p_ in parsed) - 1.0) > 1e-6:
+        err = item("E100", field="components",
+                   detail=f"volume_fraction 합이 1이어야 합니다 (현재 {sum(p_[0] for p_ in parsed):.6f})")
+    if err is not None:
+        return ENV.build(data=None, errors=[err], warnings=[], payload=hash_payload,
+                         include_debug=include_debug, t0=t0)
+
+    res = MM.patterned_layer(parsed)
+    mat = {"type": "orthotropic_2d", "E1": res["E1"], "E2": res["E2"],
+           "G12": res["G12"], "nu12": res["nu12"],
+           "source": {"type": "estimated", "ref": "patterned_layer/stripe (Voigt‖ / Reuss⊥)"}}
+    for k in ("alpha1", "alpha2", "rho"):
+        if k in res:
+            mat[k] = res[k]
+    aniso_E = res["E1"] / res["E2"]
+    data = {
+        "material": mat,
+        "anisotropy": {"E1_over_E2": aniso_E,
+                       **({"alpha2_over_alpha1": res["alpha2"] / res["alpha1"]}
+                          if "alpha1" in res and res["alpha1"] != 0 else {})},
+        "definition": ("평행 스트라이프 가정. E1=Σf·E(등변형, 정확), E2=1/Σ(f/E)(등응력), "
+                       "G12=1/Σ(f/G), ν12=Σf·ν, α1=Σf·E·α/Σf·E, α2=Σf(1+ν)α−α1·ν12. "
+                       "**1축이 스트라이프(트레이스) 방향**이다"),
+        "usage": ("material 을 laminae[].material 에 넣고 **angle_deg 를 트레이스 방향으로** "
+                  "설정한다. 이것이 패턴 방향이 형상에 반영되는 경로다"),
+    }
+    warn = [item("W130", field="material",
+                 detail="평행 스트라이프 이상화다 — 실제 동박 패턴은 불규칙하고 국부 밀도가 "
+                        "다르다. E2·G12 는 등응력 하한이라 **보수적**이고, 실제는 E2 와 E1 사이다"),
+            item("W120", field="material",
+                 detail="source=estimated 다 — 실측 반적층(coupon) 물성이 있으면 그것을 쓸 것")]
+    if aniso_E < 1.2:
+        warn.append(item("W130", field="anisotropy",
+                         detail=f"E1/E2 = {aniso_E:.3g} 로 거의 등방이다 — 방향성이 약하면 "
+                                f"homogenize_layer 로도 충분하다"))
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
+                         payload=hash_payload, include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     assumptions_extra=[
+                         "평행 스트라이프 2상 이상화 — 두 상이 모두 층 두께를 관통한다고 본다",
+                         "등방 극한(전 상 동일 물성)에서 homogenize_layer 와 정확히 일치한다",
+                         "단위계 무관 — 출력 단위는 입력과 동일",
+                     ], include_debug=include_debug, t0=t0)

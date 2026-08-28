@@ -610,6 +610,14 @@ def run_thermal(payload, delta_t=None, panel=None, delta_c=None,
             "range": wp["warpage_range"] * f["z"],
             "definition": "w(x,y)=−½(κx x²+κy y²+κxy xy)의 판 위 최대−최소 (coplanarity). 9점 평가",
         }
+        # §18.5 선형 유효범위 게이트 — w/h가 크면 이 선형 곡률은 실현되지 않는다
+        w_over_h = wp["warpage_range"] / h
+        data["warpage"]["w_over_thickness"] = w_over_h
+        if w_over_h > 0.3:
+            warnings.append(item("W130", field="warpage",
+                                 detail=f"w/h = {w_over_h:.3g} > 0.3 — 소변형(선형) 가정을 벗어났다. "
+                                        f"실제 곡률은 이보다 작고, 비대칭 적층이면 형상이 안장이 아니라 "
+                                        f"원통 두 개로 분기할 수 있다. compute_bistable_shapes 로 확인할 것"))
 
     extra = [
         "자유변형 해석 가정: 선형 CTE/CME(온도·수분 무관 — Tg 이상 α 급변 미반영), 자유 경계·소변형",
@@ -1533,4 +1541,322 @@ def run_fatigue(payload, loads_max, loads_min=None, detail: str = "auto",
                          "등진폭·비례하중, 성분 독립(다축 상호작용 미고려) 1차 근사",
                          "S-N은 시험 데이터 범위(보통 1e4~1e7 사이클) 밖에서는 외삽 — 큰 N은 자릿수만 참고할 것",
                          "층간·박리 피로, 잔류강도 저하, 하중 순서·환경 효과는 미포함"],
+                     include_debug=include_debug, t0=t0)
+
+
+def _thermal_free_loads(si, dT: float, dC: float):
+    """자유 열·흡습 변형 → (qbars, z, h, N_f, M_f). 물성 누락 시 (None, error)."""
+    from app.solver import thermal as TH
+    for need, prop, label in ((dT != 0.0, "has_cte", "CTE(alpha)"), (dC != 0.0, "has_cme", "CME(beta)")):
+        if not need:
+            continue
+        missing = [k for k, p_ in enumerate(si.plies) if not getattr(p_, prop)]
+        if missing:
+            return None, item("E203", field="laminae",
+                              detail=f"laminae{missing} 에 {label}가 없습니다")
+    eps_free = []
+    for p_ in si.plies:
+        e = np.zeros(3)
+        if dT != 0.0:
+            e = e + TH.alpha_vector(p_.alpha1, p_.alpha2, p_.angle_deg) * dT
+        if dC != 0.0:
+            e = e + TH.alpha_vector(p_.beta1, p_.beta2, p_.angle_deg) * dC
+        eps_free.append(e)
+    A, B, D, z, h = _abd_of_plies(si.plies)
+    qbars = [MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
+             for p_ in si.plies]
+    N_f, M_f = TH.free_strain_loads(qbars, eps_free, z)
+    return (A, B, D, h, N_f, M_f), None
+
+
+def _offaxis_ratio(M: np.ndarray) -> float:
+    """행렬의 16·26 성분이 전체 대비 차지하는 비 (비틀림 표현 한계 판정용)."""
+    peak = float(np.max(np.abs(M)))
+    if peak <= 0:
+        return 0.0
+    return max(abs(float(M[0, 2])), abs(float(M[1, 2]))) / peak
+
+
+def run_bistable_shapes(payload, delta_t=None, panel=None, delta_c=None,
+                        include_debug: bool = False) -> dict:
+    """비대칭 적층의 경화 후 쌍안정 형상 — Hyer 모델 (compute_bistable_shapes, §18.2).
+
+    선형 CLT는 판 크기와 무관하게 하나의 안장 형상만 준다. 실제로는 판이 임계 크기를
+    넘으면 안장이 불안정해지고 서로 거울상인 **원통 형상 두 개**로 분기한다. 이 도구는
+    그 분기와 두 안정 형상, 임계 판 크기를 준다.
+    """
+    from app.solver import nonlinear as NL
+    from app.solver import thermal as TH
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+
+    def _num(v):
+        return (isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v))
+
+    dT = float(delta_t) if _num(delta_t) else (None if delta_t is None else "bad")
+    dC = float(delta_c) if _num(delta_c) else (None if delta_c is None else "bad")
+    if dT == "bad" or dC == "bad" or ((dT in (None, 0.0)) and (dC in (None, 0.0))):
+        return ENV.build(data=None, errors=[item("E100", field="delta_T/delta_C",
+                                                 detail="delta_T [K] 또는 delta_C [%M] 중 최소 하나는 0이 아닌 숫자여야 합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    dT, dC = dT or 0.0, dC or 0.0
+    lx, ly = _panel_to_si(panel, si.unit_system) if panel is not None else (None, None)
+    if lx is None:
+        return ENV.build(data=None, errors=[item("E100", field="panel",
+                                                 detail="panel {\"Lx\": >0, \"Ly\": >0} 은 필수입니다 — 쌍안정 분기는 판 크기에 의존합니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    loads, err = _thermal_free_loads(si, dT, dC)
+    if err is not None:
+        return ENV.build(data=None, errors=[err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+    A, B, D, h, N_f, M_f = loads
+
+    try:
+        kx_lin, ky_lin = NL.linear_curvatures(A, B, D, N_f, M_f)
+    except np.linalg.LinAlgError:
+        return ENV.build(data=None, errors=[item("E400", field="laminate")], warnings=warnings,
+                         payload=payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    en = NL.HyerEnergy(A, B, D, N_f, M_f, lx, ly)
+    span = NL.search_span(en, kx_lin, ky_lin)
+    sols = NL.find_equilibria(en, span)
+    crit = NL.critical_scale(A, B, D, N_f, M_f, lx, ly)
+
+    f = units.FROM_SI[si.unit_system]
+    equilibria = []
+    for s in sols:
+        kap = np.array([s["a"], s["b"], 0.0])
+        equilibria.append({
+            "kappa_x": s["a"] * f["kappa"], "kappa_y": s["b"] * f["kappa"],
+            "shape": NL.classify_shape(s["a"], s["b"]),
+            "stable": s["stable"],
+            "energy_per_area": s["energy"] / (lx * ly) * f["energy_area"],
+            "warpage_range": TH.warpage_over_panel(kap, lx, ly)["warpage_range"] * f["z"],
+        })
+    stable = [e for e in equilibria if e["stable"]]
+    unstable = [e for e in equilibria if not e["stable"]]
+
+    data: dict = {
+        "linear_reference": {
+            "kappa_x": kx_lin * f["kappa"], "kappa_y": ky_lin * f["kappa"],
+            "shape": NL.classify_shape(kx_lin, ky_lin),
+            "note": "선형 CLT 해 — 판 크기 무관. 임계 크기를 넘은 판에서는 실제로 실현되지 않는다",
+        },
+        "equilibria": equilibria,
+        "stable_count": len(stable),
+        "bistable": len(stable) >= 2,
+        "critical_panel": (
+            {"Lx": crit["lx"] / units.TO_SI[si.unit_system]["length"],
+             "Ly": crit["ly"] / units.TO_SI[si.unit_system]["length"],
+             "scale_vs_input": crit["scale"],
+             "definition": "종횡비를 유지한 채 판을 키울 때 안장 해가 안정성을 잃는 크기 (분기점)"}
+            if crit["scale"] is not None else None),
+    }
+    if stable and unstable:
+        barrier = min(e["energy_per_area"] for e in unstable) - min(e["energy_per_area"] for e in stable)
+        data["energy_barrier"] = {
+            "value": barrier,
+            "definition": "불안정(안장) 해와 안정 해의 단위면적 에너지 차 — 스냅스루를 막는 장벽",
+            "note": "스냅 하중 자체는 하중 인가 평형 추적이 필요해 이 도구가 계산하지 않는다",
+        }
+
+    warn = list(warnings)
+    if data["bistable"]:
+        warn.append(item("W130", field="panel",
+                         detail=f"판이 임계 크기를 넘어 안정 형상이 {len(stable)}개다 — "
+                                f"선형 해석(compute_thermal_response)의 안장 곡률은 실현되지 않는다"))
+    for mat, nm in ((A, "A"), (B, "B"), (D, "D")):
+        if _offaxis_ratio(mat) > 0.1:
+            warn.append(item("W130", field="laminae",
+                             detail=f"{nm}16/{nm}26 성분이 큽니다 — 이 모델은 γxy⁰=0·κxy=0 가정이라 "
+                                    f"비틀림 형상([±θ] 반대칭의 실제 경화 형상)을 표현하지 못합니다"))
+            break
+
+    extra = [
+        "Hyer 모델: w = −½(κx x² + κy y²), 면내 변형은 von Karman 적합조건 "
+        "ε_x,yy + ε_y,xx = −κxκy 를 만족하는 최소 다항족 (Rayleigh–Ritz 3자유도)",
+        "원통(κxκy=0)은 전개 가능면이라 막 벌점이 없고, 안장은 L⁴ 벌점을 받는다 — 이것이 분기의 원인",
+        "한계: γxy⁰=0·κxy=0 (비틀림 형상 미표현), 자유 경계, 저차 근사 — 곡률 절대값은 FE 대비 오차가 있다",
+        "정지점 탐색은 고정 격자 스캔 + 고정 반복 뉴턴 (결정론적, 난수 없음)",
+        *_source_assumptions(si),
+    ]
+    hash_payload = {"laminate": payload, "delta_T": delta_t, "delta_C": delta_c, "panel": panel}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
+                         payload=hash_payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     unit_system=si.unit_system, assumptions_extra=extra,
+                     include_debug=include_debug, t0=t0)
+
+
+def run_large_deflection(payload, panel, pressure, edge_condition: str = "movable",
+                         include_debug: bool = False) -> dict:
+    """균일압력 하 SS 판의 기하 비선형 대처짐 (compute_large_deflection, §18.3)."""
+    from app.solver import nonlinear as NL
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    lx, ly = _panel_to_si(panel, si.unit_system) if panel is not None else (None, None)
+    err = None
+    if lx is None:
+        err = item("E100", field="panel", detail="panel {\"Lx\": >0, \"Ly\": >0} 은 필수입니다")
+    elif not (isinstance(pressure, (int, float)) and not isinstance(pressure, bool)
+              and math.isfinite(pressure)):
+        err = item("E100", field="pressure", detail="pressure는 유한한 숫자여야 합니다 (압력 단위 = 탄성계수 단위)")
+    elif edge_condition not in ("movable", "immovable"):
+        err = item("E100", field="edge_condition",
+                   detail="edge_condition은 'movable'(면내 이동 자유) 또는 'immovable'(면내 구속) 이어야 합니다")
+    if err is not None:
+        return ENV.build(data=None, errors=[err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    A, _B, _D, _z, h = _abd_of_plies(si.plies)
+    D_use, appl, _h, _K = _bending_stiffness_for_navier(si, warnings)
+    q_si = float(pressure) * units.TO_SI[si.unit_system]["modulus"]
+    try:
+        res = NL.large_deflection(D_use, A, lx, ly, q_si, edge_condition == "immovable")
+    except ValueError as e:
+        return ENV.build(data=None, errors=[item("E100", field="laminate", detail=str(e))],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+
+    f = units.FROM_SI[si.unit_system]
+    ratio = abs(res["w_center"]) / h
+    data = {
+        "w_center": res["w_center"] * f["z"],
+        "w_center_linear": res["w_linear"] * f["z"],
+        "w_over_thickness": ratio,
+        "stiffening_ratio": res["stiffening_ratio"],
+        "membrane_dominant": ratio > 1.0,
+        "edge_condition": edge_condition,
+        "panel": {"Lx": panel["Lx"], "Ly": panel["Ly"]},
+        "applicability": appl,
+        "definition": ("αW + βW³ = 16q/π², w = W·sin(πx/Lx)·sin(πy/Ly) (SS, 1항 Galerkin). "
+                       "stiffening_ratio = w_linear/w_center — 1보다 크면 막 효과로 뻣뻣해진 정도"),
+    }
+    warn = list(warnings)
+    if ratio < 0.3:
+        warn.append(item("W130", field="pressure",
+                         detail=f"w/h = {ratio:.3g} < 0.3 — 기하 비선형이 거의 무의미하다. "
+                                f"solve_load_response 의 선형 해로 충분하다"))
+    if ratio > 3.0:
+        warn.append(item("W130", field="pressure",
+                         detail=f"w/h = {ratio:.3g} — 1항 Galerkin의 유효 범위를 크게 벗어났다. "
+                                f"경향만 보고 정밀 판정은 FE로 할 것"))
+    if edge_condition == "movable":
+        warn.append(item("W130", field="edge_condition",
+                         detail="면내 이동 자유 가정 — 실제 가장자리가 구속되면 처짐이 더 작다 "
+                                "(등방 정사각에서 β가 약 3.9배). 두 극단을 모두 확인할 것"))
+    extra = [
+        "SS(단순지지) 4변, 1항 Galerkin 근사 — 처짐 절대값은 FE 대비 오차가 있다 "
+        "(선형 극한에서 등방 정사각 기준 +2.4%)",
+        "면내 경계조건이 지배적 가정이다: movable(평균 막력 0) vs immovable(평균 면내변형 0)",
+        "비대칭 적층은 축소 굽힘강성 D* = D − B·A⁻¹·B 로 근사 (막-굽힘 커플링 완전 반영 아님)",
+        *_source_assumptions(si),
+    ]
+    hash_payload = {"laminate": payload, "panel": panel, "pressure": pressure,
+                    "edge_condition": edge_condition}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
+                         payload=hash_payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     unit_system=si.unit_system, assumptions_extra=extra,
+                     include_debug=include_debug, t0=t0)
+
+
+def run_postbuckling(payload, panel, applied_Nx, load_ratio: float = 0.0,
+                     include_debug: bool = False) -> dict:
+    """좌굴 후 거동 — 진폭·면내 강성비·유효폭 (compute_postbuckling, §18.4)."""
+    from app.solver import nonlinear as NL
+    from app.solver import plate_navier as NAV
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    lx, ly = _panel_to_si(panel, si.unit_system) if panel is not None else (None, None)
+    err = None
+    if lx is None:
+        err = item("E100", field="panel", detail="panel {\"Lx\": >0, \"Ly\": >0} 은 필수입니다")
+    elif not (isinstance(applied_Nx, (int, float)) and not isinstance(applied_Nx, bool)
+              and math.isfinite(applied_Nx) and applied_Nx > 0):
+        err = item("E100", field="applied_Nx", detail="applied_Nx는 압축 크기(양수)여야 합니다")
+    elif (not isinstance(load_ratio, (int, float)) or isinstance(load_ratio, bool)
+          or not math.isfinite(load_ratio)):
+        err = item("E100", field="load_ratio", detail="load_ratio = Ny/Nx 는 유한한 숫자여야 합니다 (압축 양수)")
+    if err is not None:
+        return ENV.build(data=None, errors=[err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    A, _B, _D, _z, h = _abd_of_plies(si.plies)
+    D_use, appl, _h, _K = _bending_stiffness_for_navier(si, warnings)
+    res = NAV.buckling_ncr(D_use, lx, ly, float(load_ratio))
+    if res["N_cr"] is None:
+        return ENV.build(data=None, errors=[item("E100", field="load_ratio",
+                                                 detail=f"load_ratio={load_ratio}에서는 {res['reason']}")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    n_si = float(applied_Nx) * units.TO_SI[si.unit_system]["load_n"]
+    pb = NL.postbuckling(D_use, A, lx, ly, res["mode_m"], res["mode_n"],
+                         res["N_cr"], n_si, h)
+
+    f = units.FROM_SI[si.unit_system]
+    data = {
+        "N_cr": res["N_cr"] * f["A"],
+        "applied_Nx": float(applied_Nx),
+        "load_ratio_Ny_over_Nx": float(load_ratio),
+        "mode": {"m": res["mode_m"], "n": res["mode_n"]},
+        "buckled": pb["buckled"],
+        "load_over_critical": pb["load_ratio"],
+        "stiffness_ratio": pb["stiffness_ratio"],
+        "definition": pb["definition"],
+        "applicability": appl,
+    }
+    if pb["buckled"]:
+        data.update({
+            "amplitude": pb["amplitude"] * f["z"],
+            "amplitude_over_thickness": pb["amplitude_over_thickness"],
+            "effective_width_ratio": pb["effective_width_ratio"],
+        })
+    else:
+        data["note"] = pb["note"]
+
+    warn = list(warnings)
+    if res.get("boundary"):
+        warn.append(item("W130", field="mode",
+                         detail=f"임계 모드가 스캔 상한({res['mode_scan']})에 걸렸습니다 — N_cr 과대평가 가능"))
+    warn.append(item("W130", field="edges",
+                     detail="비재하 가장자리 면내 이동 자유 가정 — 구속되면 진폭은 작아지고 "
+                            "강성비는 커진다(비보수 방향 아님)"))
+    if pb["buckled"] and pb["amplitude_over_thickness"] > 3.0:
+        warn.append(item("W130", field="amplitude",
+                         detail=f"W/h = {pb['amplitude_over_thickness']:.3g} — 1항 근사의 유효 범위를 "
+                                f"크게 벗어났다. 경향만 보고 정밀 판정은 FE로 할 것"))
+    extra = [
+        "SS 4변, 1항 Galerkin — 좌굴 모드 (m,n)은 compute_buckling과 동일한 스캔으로 결정",
+        "강성비는 끝단 수축 e = a11·N + W²p²/8 의 미분에서 유도 (등방 정사각에서 정확히 0.5)",
+        "b_eff/b = √(N_cr/N) 은 von Karman 유효폭 — 후좌굴 하중 재분배의 반경험 지표",
+        *_source_assumptions(si),
+    ]
+    hash_payload = {"laminate": payload, "panel": panel, "applied_Nx": applied_Nx,
+                    "load_ratio": load_ratio}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
+                         payload=hash_payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     unit_system=si.unit_system, assumptions_extra=extra,
                      include_debug=include_debug, t0=t0)

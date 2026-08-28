@@ -284,6 +284,60 @@ def estimate_fatigue_life(laminate: dict, loads_max: dict, loads_min: dict | Non
 
 
 @mcp.tool()
+def compute_bistable_shapes(laminate: dict, panel: dict, delta_T: float | None = None,
+                            delta_C: float | None = None) -> dict:
+    """비대칭 적층의 경화 후 실제 형상 — 쌍안정(원통 2개) 분기와 임계 판 크기.
+
+    선형 CLT(compute_thermal_response)는 판 크기와 무관하게 안장 하나만 준다. 실제로는
+    판이 임계 크기를 넘으면 안장이 불안정해지고 서로 거울상인 **원통 형상 두 개**로
+    분기한다(Hyer). 원통은 전개 가능면이라 막 에너지 벌점이 없고 안장은 L⁴ 벌점을
+    받는 것이 분기의 원인이다.
+    panel = {"Lx","Ly"} 필수 — 분기 자체가 판 크기에 의존한다. delta_T [K] 또는
+    delta_C [%M] 중 최소 하나(경화 냉각은 음수). ply별 alpha/beta 필요(없으면 E203).
+    반환: equilibria(각 정지점의 곡률·형상·안정성·에너지), bistable, critical_panel,
+    energy_barrier(스냅스루 장벽). 스냅 하중 자체는 계산하지 않는다.
+    한계: γxy⁰=0·κxy=0 이라 [±θ] 반대칭의 비틀림 형상은 표현하지 못한다(W130).
+    """
+    return _guarded(PIPE.run_bistable_shapes, laminate, delta_t=delta_T, panel=panel,
+                    delta_c=delta_C)
+
+
+@mcp.tool()
+def compute_large_deflection(laminate: dict, panel: dict, pressure: float,
+                             edge_condition: str = "movable") -> dict:
+    """균일압력 하 판의 기하 비선형(von Karman) 대처짐 — 막 효과로 인한 강성 증가.
+
+    선형 해는 w ∝ q 지만, w가 두께 수준을 넘으면 막 신장이 개입해 실제 처짐이 훨씬
+    작아진다. αW + βW³ = 16q/π² (SS 4변, 1항 Galerkin).
+    pressure 단위 = 탄성계수 단위(SI: Pa, SI_mm: MPa). 양수/음수 모두 가능.
+    edge_condition: "movable"(가장자리 면내 이동 자유, 평균 막력 0 — 기본·보수적) |
+    "immovable"(면내 구속, 평균 면내변형 0). 등방 정사각에서 β가 약 3.9배 차이나므로
+    두 극단을 모두 확인할 것.
+    반환: w_center(비선형), w_center_linear(비교), stiffening_ratio, membrane_dominant.
+    w/h < 0.3 이면 선형으로 충분하다고 W130으로 알린다.
+    """
+    return _guarded(PIPE.run_large_deflection, laminate, panel=panel, pressure=pressure,
+                    edge_condition=edge_condition)
+
+
+@mcp.tool()
+def compute_postbuckling(laminate: dict, panel: dict, applied_Nx: float,
+                         load_ratio: float = 0.0) -> dict:
+    """좌굴 후 거동 — N > N_cr 에서도 판은 즉시 무너지지 않는다.
+
+    compute_buckling은 N_cr까지만 답한다. 실제 박판은 좌굴 후에도 하중을 더 받으며,
+    면내 접선강성이 떨어지고 하중이 가장자리로 재분배된다.
+    applied_Nx = 가해진 압축 크기(양수, 단위 폭당), load_ratio = Ny/Nx.
+    반환: load_over_critical, amplitude(W)·amplitude_over_thickness, stiffness_ratio
+    (좌굴 후 면내 접선강성/좌굴 전 — 등방 정사각에서 정확히 0.5), effective_width_ratio
+    (b_eff/b = √(N_cr/N), von Karman 유효폭).
+    비재하 가장자리 면내 이동 자유 가정. W/h > 3 이면 1항 근사 범위를 벗어나 W130.
+    """
+    return _guarded(PIPE.run_postbuckling, laminate, panel=panel, applied_Nx=applied_Nx,
+                    load_ratio=load_ratio)
+
+
+@mcp.tool()
 def get_reference_cases(case_id: str | None = None) -> dict:
     """내장 기준 케이스를 반환한다. case_id 생략 시 목록.
 
@@ -350,6 +404,13 @@ def guide() -> str:
 16) 감쇠·두께 한계: compute_natural_frequencies가 loss_factor 있으면 모달 η·Q,
     G13/G23로 횡전단 유연성 R_s를 계산해 CLT가 부정확해지는 지점을 알려준다.
 17) 피로: estimate_fatigue_life(laminate, loads_max, loads_min?) — Goodman+S-N 반복 수명.
+18) 기하 비선형(V3): 선형 CLT가 깨지는 영역을 다룬다.
+    - compute_bistable_shapes(laminate, panel, delta_T) — 비대칭 적층의 실제 경화 형상.
+      선형 해가 주는 안장은 판이 임계 크기를 넘으면 실현되지 않고 원통 두 개로 분기한다.
+    - compute_large_deflection(laminate, panel, pressure, edge_condition) — w>h 영역의 처짐.
+    - compute_postbuckling(laminate, panel, applied_Nx) — N>N_cr 이후 진폭·강성비·유효폭.
+    판단 기준: compute_thermal_response의 warpage.w_over_thickness 또는 대처짐의 w/h가
+    0.3을 넘으면 선형 결과를 그대로 쓰지 말고 위 도구로 재확인할 것(W130으로도 알린다).
 
 ## materialtwin 연계 (물성을 모를 때)
 - materialtwin MCP의 list_materials/search_by_property → get_material에서 실측 E를 얻는다.

@@ -1025,3 +1025,144 @@ ILSS 여유율 스케일링, 단위 브리지, 결정론, 엣지(V=0·ilss 부�
 13. (v2.3) §16.6 신설 — hwax portal(HEAXHub) 실측 결과 슬러그 기반 주소 체계(`/apps/{slug}/` Caddy 동적 라우트, proxy 모드, `GET /apps` 카탈로그)가 이미 존재함을 확인. 배포 시 IP:port 대신 슬러그 주소 채택, 원안 §10의 포트 스캔 정책은 로컬 HTTP 모드 한정으로 축소. 미실측 검증 5항목을 Phase 6 DoD로 이관.
 14. (v2.4, 구현 세션) MVP 구현 완료를 반영한 개정 — (a) 패키지 레이아웃 `server/` → `app/` (HEAXHub fastapi 스택 기본 entrypoint `app.main:app` 정합, §9의 파일명은 app/ 하위로 읽을 것), (b) D10 언어 규약을 한국어로 개정(Q8 채택), (c) HTTP transport를 Phase 6에서 선행 구현(hwax 등록 요구) — MCP SDK의 DNS rebinding Host 검증은 loopback 바인드+프록시 경계 전제로 비활성화(§16.6 검증 항목 1건 해소), (d) E400·E500은 트리거 경로가 V1 기능(하중응답·타임아웃)에 있어 유발 테스트 유예, (e) StreamableHTTPSessionManager는 프로세스당 1회 기동 제약 확인(운영 영향 없음), (f) HEAXHub 스키마 v2 실검증 결과 — `health_check`/`restart_policy`는 `launch` 하위, `build.type` 필수, `source.ref` 불허 (materialtwin-web 오버레이는 이 세 가지를 위반한 채 스택 기본값으로 동작 중 — 해당 프로젝트에 전달 권장).
 15. (v2.5, 완성 세션) V1 Tool 4종·§5.2 지표·sympy 오라클·강건성·math_spec/agent_guide/S5 로그 완료. hwax 등록을 심볼릭 링크 in-tree 통합으로 전환해 **카탈로그 등록(v0.2.0)·빌드·기동·Caddy 라우트까지 실증**(§16.6 검증 항목 갱신 — authz 게이트 확인, SSE 포털 통과는 토큰 확보 후). E400·E500 실트리거 확보로 v2.4(d) 유예 해소. 서버/엔진 0.2.0.
+
+---
+
+## 18. V3: 기하 비선형 (von Karman) — bistability·대처짐·좌굴후 (2026-08-01 사양, 서버 0.8.0)
+
+### 18.0 착수 근거 (실측)
+
+[0/90] CFRP 0.25mm, ΔT=−150K에서 선형 CLT가 20mm 판에 w/h=4.1, 200mm 판에 w=102mm(w/h=409)를
+예측한다. von Karman 유효한계(w/h≈0.3~0.5)를 한참 넘고 형상도 안장형(κx=−κy)으로 나오지만,
+Hyer(1981) 실험은 큰 비대칭 판이 두 원통형으로 스냅함을 보인다 — **현재 열 warpage는 얇은
+비대칭 적층에서 크기·형상 모두 틀린다.** §18은 이 결함을 메우고 선형 도구에 유효범위 게이트를 단다.
+
+### 18.1 성격 선언 (이번 확장만의 규약)
+
+§17까지는 전부 폐형해였다. §18은 **Rayleigh–Ritz/Galerkin 1항 근사**다. 따라서:
+- **분기·임계값·경향 판정은 신뢰**하되 **곡률·처짐 절대값은 FE 대비 오차**가 있음을 응답에 명시.
+- 검증 기준을 바꾼다 — "FE와 몇 % 일치"가 아니라 ① **극한 환원**(작은 판/작은 하중 → 선형해 수렴),
+  ② **에너지 감소**(찾은 해가 정지점이며 안정해가 더 낮은 에너지), ③ **불변식**(대칭성·부호·단조성).
+- 근사 차수와 가정을 assumptions에 명시하고 W130을 동반한다.
+
+### 18.2 bistable_shapes — Hyer 모델 (비대칭 적층 실제 형상)
+
+**정식화.** w = −½(a x² + b y²) (a=κx, b=κy 상수 곡률). 면내 변형은 von Karman **적합조건**
+
+  ε_x,yy + ε_y,xx − γ_xy,xy = w,xy² − w,xx·w,yy = −a·b
+
+를 만족해야 한다. 이를 만족하는 최소 다항족을 Ritz 부분공간으로 쓴다:
+
+  ε_x⁰ = c₁ − d₁y²,  ε_y⁰ = c₂ + (d₁ − ab/2)x²,  γ_xy⁰ = 0   (자유도 c₁, c₂, d₁)
+
+**이 적합조건이 §18의 핵심이다.** a·b = 0(원통)이면 우변이 0이라 균일 변형이 적합하므로
+**막 에너지 벌점이 전혀 없고**(원통은 전개 가능면), a·b ≠ 0(안장·구면)이면 변형이 2차로
+변해야 해 L⁴ 벌점이 붙는다. 판이 커질수록 안장이 불리해져 원통 두 개로 분기하는 것이 곧
+쌍안정성이다.
+
+> ⚠ 초기 사양은 Hyer의 다항 가정을 ε⁰ = (c₁ − ½a²x², c₂ − ½b²y², 0) 으로 적었는데, 이는
+> 적합 잔차가 0 이어서 **필요값 −ab와 어긋난다**(sympy로 확인). 구현해 보니 원통에 없는
+> a⁴ 벌점을 물리고 안장에는 아무 벌점도 안 물려 **분기가 통째로 사라졌다** — 판을 키울수록
+> 곡률이 0으로 가는 물리적으로 틀린 답을 냈다. 위 적합족으로 교체해 해결했다.
+
+총 포텐셜(판 [−Lx/2,Lx/2]×[−Ly/2,Ly/2] 적분):
+
+  U = ∬[½ε⁰ᵀAε⁰ + ε⁰ᵀBκ + ½κᵀDκ − N_fᵀε⁰ − M_fᵀκ] dxdy
+
+기저 f = [1, x², y²] 의 그램 행렬(∫f_i f_j)로 조립한다. 필요 적분: S0=LxLy,
+Sx2=Lx³Ly/12, Sy2=LxLy³/12, Sx4=Lx⁵Ly/80, Sy4=LxLy⁵/80, Sx2y2=Lx³Ly³/144.
+
+**해법(결정론).** U는 (c₁,c₂,d₁)에 대해 2차이므로 3×3 선형계로 **정확히 소거**한다. 남은
+∂U/∂a=∂U/∂b=0 은 **고정 격자(GRID_N=15) 전수 스캔 + 고정 반복수(40) 뉴턴**으로 푼다 —
+난수·적응 종료 없음(바이트 동일 보장). c가 최적이므로 (a,b) 도함수는 **포락선 정리**로
+정확히 얻는다(수치 미분 대조로 상대오차 1e-10 확인). 각 해의 Hessian 최소 고윳값 부호로
+**안정/불안정**을 판정한다.
+
+**탐색 폭.** 선형 CLT 곡률로 격자를 잡으면 안 된다 — 비선형이 억제한 실제 곡률이 훨씬
+작을 수 있어 관심 영역이 격자 한 칸보다 작아진다(실측: 잘못된 정식화에서 선형 10.2 vs
+실제 0.2 [1/m]). b=0(순수 원통)이면 ∂U/∂a 가 a에 대해 **정확히 선형**이므로 두 점으로 그
+근을 정확히 잡아 선형 곡률과 함께 폭을 정한다.
+
+**임계 판 크기.** 매 배율마다 전수 스캔을 다시 도는 대신(≈1초/회) **안장 가지를 연속 추적**
+한다 — 배율을 로그 격자(81점)로 키우며 직전 해를 시작점으로 뉴턴 1회만 돌리고, Hessian
+최소 고윳값의 부호가 바뀌는 구간을 고정 반복(30회) 이분법으로 좁힌다.
+
+**출력.** `equilibria[{kappa_x, kappa_y, shape: cylindrical|saddle|spherical|flat, stable,
+energy_per_area, warpage_range}]`, `stable_count`, `bistable`, `critical_panel{Lx,Ly,scale_vs_input}`,
+`energy_barrier`(불안정해−안정해 단위면적 에너지 = 스냅스루 장벽), `linear_reference`(선형 CLT 대조).
+
+**계산하지 않는 것.** **스냅 하중**은 주지 않는다 — 하중을 인가한 상태의 평형 가지를 추적해
+한계점을 찾아야 하는데 이 도구는 무하중 형상만 푼다. 에너지 장벽까지만 주고 그렇게 명시한다.
+
+**한계.** γxy⁰=0·κxy=0 이라 **비틀림 형상을 표현하지 못한다**. [±θ] 반대칭의 실제 경화 형상은
+비틀림이므로 A/B/D의 16·26 성분이 유의하면 W130으로 알린다.
+
+**검증(구현됨, tests/test_nonlinear.py).** ① 적합조건 만족 ② gradient가 에너지 수치미분과 일치
+③ 작은 판(2mm) 극한에서 선형 CLT κ에 rtol 2e-3 수렴 ④ 큰 판에서 안정 원통 2 + 불안정 안장 1
+⑤ 두 원통해가 (a,b)→(−b,−a) 거울쌍이고 에너지 동일 ⑥ 안정해 에너지 < 불안정해 ⑦ 대칭 적층은
+평평한 유일해, critical_scale=None ⑧ 임계 크기 ∝ 두께(L/h 불변, rtol 1e-6) ⑨ 임계 크기가
+전수 스캔의 해 개수 변화(1↔3)를 정확히 괄호 ⑩ SI/SI_mm 일치 ⑪ 결정론.
+
+### 18.3 large_deflection — 대처짐 하중–처짐 (1항 Galerkin)
+
+**정식화.** SS 판, w = W·sin(px)sin(qy) (p=π/Lx, q=π/Ly), 균일압력 q_z. Airy 함수 F의
+적합조건 a22F,xxxx + (2a12+a66)F,xxyy + a11F,yyyy = w,xy² − w,xx w,yy 의 특수해를 평형식에
+Galerkin 투영하면 (a = A의 2×2 면내 컴플라이언스, sympy로 대수 검증):
+
+  α·W + β·W³ = 16q_z/π²
+  α = D11p⁴ + 2(D12+2D66)p²q² + D22q⁴
+  β_movable   = p⁴/(16a11) + q⁴/(16a22)
+  β_immovable = β_movable + (A11p⁴ + 2A12p²q² + A22q⁴)/8
+
+**면내 경계조건이 지배적 가정이다.** movable(가장자리 면내 이동 자유, 평균 막력 0)과
+immovable(면내 구속, 평균 면내변형 0)에서 β가 등방 정사각 기준 (3−ν)/(1−ν) ≈ 3.86배
+차이난다. 어느 쪽인지에 따라 답이 크게 갈리므로 **명시 입력**(`edge_condition`)으로 두고
+기본값은 보수적인 movable로 한다.
+
+**해법.** α,β>0 이므로 실근 1개 — **Cardano 폐형해**, 반복 없음.
+**출력.** w_center(비선형), w_center_linear, w_over_thickness, stiffening_ratio(=w_linear/w_center),
+membrane_dominant(w/h>1), edge_condition, applicability.
+**검증(구현됨).** ① 선형 극한이 1항 Navier 정확값 4/π⁶·qL⁴/D 와 rtol 1e-12 일치(Levy 정해
+0.004062 대비 +2.4% — 알려진 1항 오차, assumptions에 명시) ② Cardano 근이 방정식을 만족
+③ q→0에서 stiffening_ratio가 1로 단조 수렴 ④ immovable/movable β비 = (3−ν)/(1−ν) 정확
+⑤ 압력 부호 반전 시 처짐도 정확히 반전(홀함수) ⑥ w/h<0.3·>3 경고.
+
+### 18.4 postbuckling — 좌굴 후 거동
+
+**정식화.** §18.3과 같은 1항 Galerkin에서 압력 대신 압축 막력을 넣으면
+αW − N(p² + R·q²)W + βW³ = 0. 좌굴은 N_cr = α/(p²+Rq²) 이고 — 이는 기존
+`compute_buckling`의 Navier 식과 **동일**하므로 임계 모드 (m,n)과 N_cr을 그 솔버에서
+그대로 받아 쓴다 — 좌굴 후는
+
+  W = √((α/β)(N/N_cr − 1)),  b_eff/b = √(N_cr/N) (von Karman 유효폭)
+
+**강성비는 하드코딩하지 않는다.** 끝단 수축 e = a11·N + W²p²/8 을 미분해
+
+  S = (dN/de)_post/(dN/de)_pre = a11/(a11 + p⁴/(8β))
+
+를 얻는다. 등방 정사각·movable에서 정확히 **0.5**(고전값)로 환원되고, 면내 비대칭
+(a11≠a22) 적층에서는 0.5가 아니다.
+
+**출력.** N_cr, mode{m,n}, buckled, load_over_critical, amplitude·amplitude_over_thickness,
+stiffness_ratio, effective_width_ratio.
+**검증(구현됨).** ① 등방 정사각 S=0.5 정확 ② W ∝ √(N/N_cr−1) ③ b_eff/b=√(N_cr/N)
+④ N<N_cr이면 buckled=False ⑤ N_cr·모드가 compute_buckling과 rtol 1e-12 일치
+⑥ 불균형 적층은 S≠0.5 ⑦ 입력 오류 E100.
+
+### 18.5 게이트 — 선형 도구의 유효범위 경고
+
+`compute_thermal_response`가 panel을 받으면 **w/h를 계산해 응답에 싣고(warpage.w_over_thickness),
+0.3 초과 시 W130** + `compute_bistable_shapes`로 안내한다. 이것이 §18의 실질 가치 절반이다 —
+기존 도구가 조용히 틀린 답을 주는 것을 막는다.
+
+`solve_load_response`에는 게이트를 걸지 않는다. panel 입력이 없어 곡률만으로는 w/h를 만들
+길이 척도가 없기 때문이다. 대신 열 도구의 게이트와 대처짐 도구의 w/h<0.3 경고가 같은 역할을
+한다(양쪽에서 선형/비선형 경계를 알려준다).
+
+### 18.6 신규 Tool 3종 → 총 24종
+
+- `compute_bistable_shapes(laminate, panel, delta_T?, delta_C?)` — panel 필수(분기가 크기 의존).
+- `compute_large_deflection(laminate, panel, pressure, edge_condition="movable"|"immovable")`.
+- `compute_postbuckling(laminate, panel, applied_Nx, load_ratio?)`.
+
+미구현으로 남긴 것: **재료 전단 비선형**(Hahn–Tsai 등 γ12 비선형) — §18 항목 4로 별도.

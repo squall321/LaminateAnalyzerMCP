@@ -56,6 +56,10 @@
 - [x] ~~점탄성 감쇠 합성~~ — v0.6.0 모달 η·Q (MSE, 1차 모드·중립면 정합)
 - [x] ~~간이 피로~~ — v0.7.0 estimate_fatigue_life (정규화 FI + Goodman + log_linear/basquin)
 - [ ] (보류) 채널링 g(α,β) 보정표 — 수기 이식 리스크로 미탑재 유지 (계획서 §17.7.3)
+- [x] ~~기하 비선형 (V3)~~ — v0.8.0: compute_bistable_shapes(Hyer 쌍안정·임계 판 크기)
+      + compute_large_deflection(von Karman, movable/immovable) + compute_postbuckling
+      + 선형 도구 유효범위 게이트(thermal warpage w/h>0.3 → W130). 도구 24종, 테스트 243
+- [ ] 재료 전단 비선형 (γ12 비선형, Hahn–Tsai) — §18 항목 4, 미착수
 
 ### 품질·플랫폼
 - [x] ~~P4 문헌 벤치마크~~ — v0.7.0 완결 (교과서 Q 공표값 + Tsai-Pagano 불변량 독립 교차검증)

@@ -1,6 +1,8 @@
 # §19.19 샌드위치 국부 파손 — 면재 주름·셀 딤플링·코어 전단 (2순위 6번)
 from __future__ import annotations
 
+import math
+
 import pytest
 
 import app.mcp_server as srv
@@ -174,13 +176,17 @@ def test_core_shear_governs_without_face_compression():
 
 
 def test_face_material_margin_excludes_core_strength():
-    """면재 재료 여유에 코어 Xc 가 섞이면 안 된다 (GATE-04)."""
+    """면재 재료 여유는 면재 ply 의 재료축 Tsai-Wu 다 (GATE-04 + SW-01)."""
+    lam = _SW_S
     d = srv.assess_sandwich_local_failure(
-        _SW_S, core=_CORE_IN, applied={"N": [-200.0, 0.0, 0.0]})["data"]
-    s_app = d["face_stress"]["max_compressive"]
-    # 면재 Xc=570 기준이어야 한다. 코어 Xc=1.5 가 섞이면 0.008 로 "이미 파손"이 된다.
-    assert d["governing"]["margins"]["face_material"] == pytest.approx(570.0 / s_app, rel=1e-9)
-    assert d["governing"]["margin"] > 1.0
+        lam, core=_CORE_IN, applied={"N": [-200.0, 0.0, 0.0]})["data"]
+    # 코어 Xc=1.5 가 섞이면 0.008 로 "이미 파손"이 된다 — 면재 기준이어야 한다
+    assert d["governing"]["margins"]["face_material"] > 1.0
+    # 같은 서버의 다른 경로(recover_ply_stresses)와 일치해야 한다
+    rp = srv.recover_ply_stresses(lam, loads={"N": [-200.0, 0.0, 0.0]})["data"]
+    face_r = min(loc["failure"]["tsai_wu_R"] for p in rp["plies"] if p["ply"] != 1
+                 for loc in p["stresses"].values() if loc["failure"]["tsai_wu_R"] is not None)
+    assert d["governing"]["margins"]["face_material"] == pytest.approx(face_r, rel=1e-9)
 
 
 def test_core_shear_competes_with_face_modes():
@@ -192,3 +198,64 @@ def test_core_shear_competes_with_face_modes():
     assert d["governing"]["margin"] == pytest.approx(min(m.values()), rel=1e-12)
     assert d["governing"]["mode"] == "core_shear"
     assert d["governing"]["basis"] == sorted(m)
+
+
+# --- SW-01 / SW-02 / SW-03: 방향·재료축·합력 ----------------------------------
+
+_OFF = {"type": "orthotropic_2d", "E1": 70000.0, "E2": 70000.0, "G12": 26900.0, "nu12": 0.3,
+        "strength": {"Xt": 1200.0, "Xc": 1200.0, "Yt": 200.0, "Yc": 200.0, "S": 100.0}}
+_CP = {"type": "isotropic", "E": 1.0, "nu": 0.3}
+_C_IN = {"Ez": 138.0, "Gc": 44.0, "shear_strength": 1.5}
+
+
+def _off_sw(ang):
+    return {"unit_system": "SI_mm", "laminae": [
+        {"material": _OFF, "angle_deg": ang, "thickness": 1.0},
+        {"material": _CP, "angle_deg": 0.0, "thickness": 20.0},
+        {"material": _OFF, "angle_deg": ang, "thickness": 1.0}]}
+
+
+def test_face_material_uses_material_axes():
+    """off-axis 면재는 Yc·S 로 판정해야 한다 — 전역 σx 를 Xc 와 비교하면 6배 낙관."""
+    lam = _off_sw(90.0)
+    d = srv.assess_sandwich_local_failure(
+        lam, core=_C_IN, applied={"N": [-303.0, 0.0, 0.0]})["data"]
+    rp = srv.recover_ply_stresses(lam, loads={"N": [-303.0, 0.0, 0.0]})["data"]
+    ref = min(loc["failure"]["tsai_wu_R"] for p in rp["plies"] if p["ply"] != 1
+              for loc in p["stresses"].values() if loc["failure"]["tsai_wu_R"] is not None)
+    assert d["governing"]["margins"]["face_material"] == pytest.approx(ref, rel=1e-9)
+    # Xc/σx 였다면 4.8 이 나온다 — 그 값이 아니어야 한다
+    assert d["governing"]["margins"]["face_material"] < 2.0
+
+
+def test_governing_is_rotation_invariant():
+    """같은 물리 문제를 축만 90° 돌리면 같은 답이 나와야 한다 (SW-02)."""
+    a = srv.assess_sandwich_local_failure(
+        _off_sw(0.0), core=_C_IN, applied={"N": [0.0, -1000.0, 0.0]},
+        shear={"Vx": 2.0})["data"]["governing"]
+    b = srv.assess_sandwich_local_failure(
+        _off_sw(90.0), core=_C_IN, applied={"N": [-1000.0, 0.0, 0.0]},
+        shear={"Vx": 2.0})["data"]["governing"]
+    assert a["mode"] == b["mode"]
+    assert a["margin"] == pytest.approx(b["margin"], rel=1e-9)
+    assert a["margin"] < 1.0
+
+
+def test_ny_compression_does_not_erase_face_modes():
+    """Ny 압축이어도 면재 모드가 후보로 남는다 — 전에는 core_shear 만 남았다."""
+    d = srv.assess_sandwich_local_failure(
+        _off_sw(0.0), core=_C_IN, applied={"N": [0.0, -1000.0, 0.0]},
+        shear={"Vx": 2.0})["data"]
+    assert d["face_stress"]["by_direction"]["y"]["max_compressive"] > 0
+    assert "face_wrinkling" in d["governing"]["margins"]
+    assert set(d["governing"]["margins"]) >= {"face_wrinkling", "face_material", "core_shear"}
+
+
+def test_core_shear_uses_resultant():
+    """τ_c 는 √(Vx²+Vy²)/d — max(|Vx|,|Vy|) 는 최대 √2 배 비보수다 (SW-03)."""
+    one = srv.assess_sandwich_local_failure(
+        _off_sw(0.0), core=_C_IN, shear={"Vx": 5.0})["data"]["modes"]["core_shear"]
+    two = srv.assess_sandwich_local_failure(
+        _off_sw(0.0), core=_C_IN, shear={"Vx": 5.0, "Vy": 5.0})["data"]["modes"]["core_shear"]
+    assert two["tau_core"] / one["tau_core"] == pytest.approx(math.sqrt(2.0), rel=1e-12)
+    assert two["margin"] < one["margin"]

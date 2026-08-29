@@ -3640,32 +3640,48 @@ def run_sandwich_local(payload, core, applied=None, shear=None, core_ply=None,
              for p_ in si.plies]
     th = list(si.thicknesses)
     z = ABD.z_coordinates(th)
-    ea1, ei1 = PC.sublaminate_ea_ei(qbars, th, 0, k_core)
-    ea2, ei2 = PC.sublaminate_ea_ei(qbars, th, k_hi + 1, n)
-    t1 = float(sum(th[:k_core]))
-    t2 = float(sum(th[k_hi + 1:]))
+    # 면재 유효계수를 **x·y 두 방향 모두** 구한다. 전에는 x 만 봐서 Ny 압축이면
+    # 면재 모드가 통째로 사라지고 core_shear 만 남았다(적대 검증 SW-02, 16.8배 모순).
+    def _face_moduli(i0, i1):
+        sub_t = list(th[i0:i1])
+        zl = ABD.z_coordinates(sub_t)
+        Af, Bf, Df = ABD.abd_matrices(list(qbars[i0:i1]), zl)
+        al, _bl, dl = RESP.compliance_blocks(Af, Bf, Df)
+        hs = float(sum(sub_t))
+        ec = RESP.effective_constants(al, dl, hs)["membrane"]
+        return float(ec["Ex"]), float(ec["Ey"]), hs
+
+    ef1x, ef1y, t1 = _face_moduli(0, k_core)
+    ef2x, ef2y, t2 = _face_moduli(k_hi + 1, n)
     t_core_total = float(sum(th[k_core:k_hi + 1]))
-    ef1, ef2 = ea1 / t1, ea2 / t2                 # 면재 축방향 유효 탄성계수
     d_faces = 0.5 * (t1 + t2) + t_core_total      # 면재 중심 거리
     nu_face = si.plies[0].nu12
 
     f = units.FROM_SI[si.unit_system]
     modes: dict[str, dict] = {}
     lo_k, hi_k = SW.WRINKLING_K_RANGE
-    e_face = min(ef1, ef2)                        # 얇은/무른 면재가 먼저 주름진다
-    wr_lo = SW.face_wrinkling_stress(e_face, ez, gc, lo_k)
-    wr_hi = SW.face_wrinkling_stress(e_face, ez, gc, hi_k)
+    e_dir = {"x": min(ef1x, ef2x), "y": min(ef1y, ef2y)}   # 무른 면재가 먼저 주름진다
+    wr = {ax: (SW.face_wrinkling_stress(e_dir[ax], ez, gc, lo_k),
+               SW.face_wrinkling_stress(e_dir[ax], ez, gc, hi_k)) for ax in ("x", "y")}
     modes["face_wrinkling"] = {
-        "sigma_conservative": wr_lo * f["modulus"], "sigma_optimistic": wr_hi * f["modulus"],
+        "sigma_conservative": min(wr["x"][0], wr["y"][0]) * f["modulus"],
+        "sigma_optimistic": min(wr["x"][1], wr["y"][1]) * f["modulus"],
+        "by_direction": {ax: {"E_face": e_dir[ax] * f["modulus"],
+                              "sigma_conservative": wr[ax][0] * f["modulus"],
+                              "sigma_optimistic": wr[ax][1] * f["modulus"]}
+                         for ax in ("x", "y")},
         "k_range": list(SW.WRINKLING_K_RANGE),
         "definition": "Hoff–Mautner σ_wr = k(E_f·E_z·G_c)^(1/3). **k 가 문헌마다 0.5~0.825 로 "
-                      "갈린다**(1.65배) — 단일값을 쓰지 말고 보수값으로 판정할 것",
+                      "갈린다**(1.65배) — 단일값을 쓰지 말고 보수값으로 판정할 것. "
+                      "E_f 는 압축 방향의 면재 유효계수라 x·y 를 따로 낸다",
     }
     if cell is not None:
         t_thin = min(t1, t2)
-        sd = SW.intracell_dimpling_stress(e_face, nu_face, t_thin, cell)
+        sd_dir = {ax: SW.intracell_dimpling_stress(e_dir[ax], nu_face, t_thin, cell)
+                  for ax in ("x", "y")}
         modes["intracell_dimpling"] = {
-            "sigma": sd * f["modulus"], "cell_size": cell / fl,
+            "sigma": min(sd_dir.values()) * f["modulus"], "cell_size": cell / fl,
+            "by_direction": {ax: sd_dir[ax] * f["modulus"] for ax in ("x", "y")},
             "definition": "σ_d = 2E_f/(1−ν²)(t_f/s)² — 얇은 면재·큰 셀에서 지배한다",
         }
 
@@ -3683,14 +3699,32 @@ def run_sandwich_local(payload, core, applied=None, shear=None, core_ply=None,
                              payload=payload, unit_system=si.unit_system,
                              include_debug=include_debug, t0=t0)
         from app.solver import failure as FAIL
-        peak = 0.0
-        peak_ply = None
+        peak_dir = {"x": 0.0, "y": 0.0}
+        ply_dir: dict[str, int | None] = {"x": None, "y": None}
+        worst_r = None                            # 면재 재료 파손 강도비 (Tsai-Wu)
+        worst_r_ply = None
         for k in list(range(0, k_core)) + list(range(k_hi + 1, n)):
+            p_k = si.plies[k]
             for zv in (float(z[k]), float(z[k + 1])):
-                sx = float(FAIL.ply_stresses_at(qbars[k], eps0, kappa, zv)[0])
-                if -sx > peak:                   # 압축만 주름·딤플링을 유발한다
-                    peak, peak_ply = -sx, k
-        face_stress = {"max_compressive": peak * f["modulus"], "ply": peak_ply}
+                sig = FAIL.ply_stresses_at(qbars[k], eps0, kappa, zv)
+                for ax, idx in (("x", 0), ("y", 1)):
+                    s_ax = float(sig[idx])
+                    if -s_ax > peak_dir[ax]:      # 압축만 주름·딤플링을 유발한다
+                        peak_dir[ax], ply_dir[ax] = -s_ax, k
+                # **재료축으로 돌려 Xt/Xc/Yt/Yc/S 전부와 겨룬다.** 전역 σx 를 섬유방향 Xc 와
+                # 비교하면 off-axis 면재에서 6~7.5배 낙관이다(적대 검증 SW-01).
+                if p_k.strength is not None:
+                    s12 = FAIL.stress_to_material_axes(sig, p_k.angle_deg)
+                    rr = FAIL.tsai_wu(s12, *p_k.strength).get("strength_ratio")
+                    if rr is not None and rr >= 0 and (worst_r is None or rr < worst_r):
+                        worst_r, worst_r_ply = float(rr), k
+        gov_ax = "x" if peak_dir["x"] >= peak_dir["y"] else "y"
+        face_stress = {"max_compressive": peak_dir[gov_ax] * f["modulus"],
+                       "ply": ply_dir[gov_ax], "direction": gov_ax,
+                       "by_direction": {ax: {"max_compressive": peak_dir[ax] * f["modulus"],
+                                             "ply": ply_dir[ax]} for ax in ("x", "y")},
+                       **({"tsai_wu_strength_ratio": worst_r, "critical_ply": worst_r_ply}
+                          if worst_r is not None else {})}
 
     if shear is not None:
         if not (isinstance(shear, dict) and set(shear) <= {"Vx", "Vy"}
@@ -3701,28 +3735,36 @@ def run_sandwich_local(payload, core, applied=None, shear=None, core_ply=None,
                              warnings=warnings, payload=payload, unit_system=si.unit_system,
                              include_debug=include_debug, t0=t0)
         fv = units.TO_SI[si.unit_system]["load_n"]
-        v_si = max(abs(float(shear.get(k, 0.0))) for k in ("Vx", "Vy")) * fv
+        # τ_xz 와 τ_yz 는 직교면에 작용하므로 등방 코어 단일 강도로 판정하려면 **합력**이다.
+        # max(|Vx|,|Vy|) 를 쓰면 두 성분이 같을 때 √2 배 비보수다(적대 검증 SW-03).
+        v_si = math.hypot(float(shear.get("Vx", 0.0)), float(shear.get("Vy", 0.0))) * fv
         tau = SW.core_shear_stress(v_si, d_faces)
-        blk = {"tau_core": tau * f["modulus"],
-               "definition": "τ_c = V/d (d = 면재 중심 거리). 코어가 전단을 전부 지탱한다는 표준 근사"}
+        blk = {"tau_core": tau * f["modulus"], "V_resultant": v_si / fv,
+               "definition": "τ_c = √(Vx²+Vy²)/d (d = 면재 중심 거리). 코어가 전단을 전부 "
+                             "지탱한다는 표준 근사"}
         if tau_allow is not None:
             blk["margin"] = tau_allow / tau if tau > 0 else None
         modes["core_shear"] = blk
 
     # 지배 모드 판정 — 면재 압축응력 대비 여유
     cand: dict[str, float] = {}
-    if face_stress is not None and face_stress["max_compressive"] > 0:
-        s_app = face_stress["max_compressive"]
-        cand["face_wrinkling"] = modes["face_wrinkling"]["sigma_conservative"] / s_app
-        if "intracell_dimpling" in modes:
-            cand["intracell_dimpling"] = modes["intracell_dimpling"]["sigma"] / s_app
-        # **코어 강도를 섞지 않는다** — 코어는 면재 압축응력을 받는 층이 아니다.
-        # 전 ply 최소를 쓰면 무른 코어의 Xc 가 들어와 지배 모드가 face_material 로
-        # 뒤집히고 "이미 파손"이라는 거짓 판정이 난다(적대 검증 GATE-04).
-        face_strengths = [si.plies[k].strength for k in range(n)
-                          if not (k_core <= k <= k_hi) and si.plies[k].strength is not None]
-        if face_strengths:
-            cand["face_material"] = min(s[1] for s in face_strengths) * f["modulus"] / s_app
+    if face_stress is not None:
+        # 방향마다 그 방향의 면재 계수로 판정하고 **더 작은 여유**를 쓴다
+        for ax in ("x", "y"):
+            s_ax = face_stress["by_direction"][ax]["max_compressive"]
+            if s_ax <= 0:
+                continue
+            wr_ax = modes["face_wrinkling"]["by_direction"][ax]["sigma_conservative"]
+            cand["face_wrinkling"] = min(cand.get("face_wrinkling", math.inf), wr_ax / s_ax)
+            if "intracell_dimpling" in modes:
+                sd_ax = modes["intracell_dimpling"]["by_direction"][ax]
+                cand["intracell_dimpling"] = min(cand.get("intracell_dimpling", math.inf),
+                                                 sd_ax / s_ax)
+        # 면재 재료 여유는 **재료축 Tsai-Wu 강도비**다. 전역 σx 를 섬유방향 Xc 와 비교하던
+        # 방식은 off-axis 면재에서 6~7.5배 낙관이었다(적대 검증 SW-01). 코어 ply 는 애초에
+        # 제외한다(GATE-04).
+        if face_stress.get("tsai_wu_strength_ratio") is not None:
+            cand["face_material"] = face_stress["tsai_wu_strength_ratio"]
     # 코어 전단은 면재 압축이 없어도(순수 굽힘·인장) 독립적으로 지배할 수 있다 —
     # 전에는 face_stress 가 없으면 governing 자체가 사라져 조용히 빠졌다(NC-03).
     if "core_shear" in modes and modes["core_shear"].get("margin") is not None:
@@ -3732,9 +3774,10 @@ def run_sandwich_local(payload, core, applied=None, shear=None, core_ply=None,
         name = min(cand, key=lambda k: (cand[k], k))
         governing = {"mode": name, "margin": cand[name], "margins": cand,
                      "basis": sorted(cand),
-                     "definition": "여유 = 국부 파손 응력 ÷ 면재 최대 압축응력 (보수 k 기준). "
-                                   "코어 전단 여유는 τ_allow/τ_c 로 따로 계산해 함께 겨룬다. "
-                                   "면재 재료강도에는 코어 ply 를 넣지 않는다"}
+                     "definition": "주름·딤플링 여유 = 그 방향의 국부 파손 응력 ÷ 같은 방향 면재 "
+                                   "압축응력(보수 k 기준, x·y 중 작은 쪽). face_material 은 면재 "
+                                   "ply 의 **재료축 Tsai-Wu 강도비**다(코어 ply 제외). 코어 전단 "
+                                   "여유는 τ_allow/τ_c 로 따로 계산해 함께 겨룬다"}
 
     data = {
         "core_ply": {"index": k_core, "indices": list(range(k_core, k_hi + 1)),
@@ -3742,7 +3785,8 @@ def run_sandwich_local(payload, core, applied=None, shear=None, core_ply=None,
                      "detected": "auto" if auto else "explicit",
                      "Ez": ez * f["modulus"], "Gc": gc * f["modulus"]},
         "faces": {"thickness": [t1 * f["z"], t2 * f["z"]],
-                  "E_effective": [ef1 * f["modulus"], ef2 * f["modulus"]],
+                  "E_effective": [ef1x * f["modulus"], ef2x * f["modulus"]],
+                  "E_effective_y": [ef1y * f["modulus"], ef2y * f["modulus"]],
                   "center_distance": d_faces * f["z"]},
         "modes": modes,
         **({"face_stress": face_stress} if face_stress else {}),
@@ -3754,7 +3798,7 @@ def run_sandwich_local(payload, core, applied=None, shear=None, core_ply=None,
     warn = list(warnings)
     warn.append(item("W130", field="modes.face_wrinkling",
                      detail=f"주름 계수 k 가 문헌마다 {lo_k}~{hi_k} 로 갈린다 — 응력이 "
-                            f"{wr_hi / wr_lo:.2f}배 차이난다. **보수값(k={lo_k})으로 판정**하고 "
+                            f"{hi_k / lo_k:.2f}배 차이난다. **보수값(k={lo_k})으로 판정**하고 "
                             f"정밀 판정이 필요하면 시험으로 계수를 확정할 것"))
     if governing is not None and governing["margin"] < 1.0:
         warn.append(item("W130", field="governing",

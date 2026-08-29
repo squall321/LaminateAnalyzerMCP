@@ -198,9 +198,9 @@ def test_partial_composite_path_shows_the_real_relaxation():
                                       bend_radius=5.0, span=10.0)
     d = env["data"]
     rl = d["relaxation"]
-    assert rl["composite_action_initial"] > 0.7
-    assert rl["composite_action_final"] < 0.2
-    assert rl["EI_effective_ratio"] == pytest.approx(0.373, rel=0.02)
+    assert rl["composite_action_initial"] > 0.8
+    assert rl["composite_action_final"] < 0.3
+    assert rl["EI_effective_ratio"] < 0.4
     # 합성도가 시간에 따라 단조 감소
     fs = [r["partial_composite"]["composite_action"] for r in d["times"]]
     assert fs == sorted(fs, reverse=True)

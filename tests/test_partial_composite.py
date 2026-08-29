@@ -1,6 +1,8 @@
 # §19.12 순응층 부분합성 굽힘 — CLT 가 원리적으로 못 보는 것 (2순위 3번)
 from __future__ import annotations
 
+import math
+
 import pytest
 
 import app.mcp_server as srv
@@ -55,6 +57,24 @@ def test_zero_shear_modulus_gives_layered_stiffness():
     assert r["EI_effective"] == pytest.approx(r["EI_layered"], rel=1e-12)
 
 
+def test_combination_is_harmonic_not_linear():
+    """**결합이 조화형이지 선형이 아니다** — Newmark ODE 재유도로 확인된 것(적대 검증 PC-01).
+
+    두 극한(f=0, f=1)은 두 형태 모두 통과하므로 중간 구간을 고정해야 잡힌다.
+    """
+    ea1, ei1, ea2, ei2, ei_c, ei_full = _si_parts()
+    r = PC.composite_action(ea1, ei1, ea2, ei2, ei_c, ei_full, 0.3e6, 50e-6, 10e-3)
+    ei_lay, f = r["EI_layered"], r["composite_action"]
+    r_ratio = (ei_full - ei_lay) / ei_full
+    harmonic = ei_lay / (1.0 - r_ratio * f)
+    linear = ei_lay + f * (ei_full - ei_lay)
+    assert r["EI_effective"] == pytest.approx(harmonic, rel=1e-12)
+    assert linear / harmonic > 4.0            # 선형결합은 5배 가까이 과대(비보수)였다
+    # f 는 중앙처짐 metric: f = 1 − 2(1 − sech X)/X²
+    x = r["alpha_L"] / 2.0
+    assert f == pytest.approx(1.0 - 2.0 * (1.0 - 1.0 / math.cosh(x)) / (x * x), rel=1e-12)
+
+
 def test_parallel_axis_identity_gives_face_distance():
     """d² 를 EI_full − EI_layered 항등식에서 역산하므로 두 값과 항상 정합한다.
 
@@ -81,10 +101,13 @@ def test_composite_action_increases_with_span():
 # ── Tool 계층 ───────────────────────────────────────────────────────────────
 
 def test_measured_foldable_case():
-    """실측 랜드마크: UTG/OCA/UTG, OCA G=0.3 MPa, L=10mm → f≈46.8%, CLT 2.03배 과대."""
+    """실측 랜드마크: UTG/OCA/UTG, OCA G=0.3 MPa, L=10mm → f≈57.4%, CLT 10.09배 과대.
+
+    (적대 검증 PC-01 이전에는 선형결합이라 f=46.8%·2.03배로 잘못 나왔다.)
+    """
     d = srv.assess_partial_composite_bending(stack(), span=10.0)["data"]
-    assert d["composite_action"] == pytest.approx(0.468, rel=0.02)
-    assert d["clt_overprediction"] == pytest.approx(2.03, rel=0.02)
+    assert d["composite_action"] == pytest.approx(0.574, rel=0.02)
+    assert d["clt_overprediction"] == pytest.approx(10.09, rel=0.02)
     assert d["EI_layered"] < d["EI_effective"] < d["EI_full_CLT"]
     assert d["core_ply"]["index"] == 1 and d["core_ply"]["detected"] == "auto"
 

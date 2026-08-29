@@ -319,7 +319,7 @@ CTE 가 있는데 `delta_T` 를 안 주면 W130 이 뜬다 — 그 경고를 무
 CLT 보다 훨씬 낮다. CLT 는 항상 완전합성(f=1)을 가정한다.
 
 `assess_partial_composite_bending(laminate, span, core_ply?)` — **span 이 필수다.**
-실측 UTG/OCA/UTG (OCA G=0.3 MPa): L=1mm 에서 CLT 가 **18.3배**, L=10mm 에서 **2.03배**
+실측 UTG/OCA/UTG (OCA G=0.3 MPa): L=1mm 에서 CLT 가 **22.1배**, L=10mm 에서 **10.1배**
 과대평가하고 L=200mm 면 1.03배로 수렴한다. 같은 스택이 스팬에 따라 완전히 다르다.
 
 - `clt_overprediction` 이 헤드라인이다 — CLT 기반 처짐·좌굴·진동수가 모두 그만큼 낙관적이다.

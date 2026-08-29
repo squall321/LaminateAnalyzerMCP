@@ -252,3 +252,96 @@ def test_relaxation_moment_follows_bend_axis():
         assert d["bend_axis"] == axis
         assert abs(d["M_initial"]) > 1e-6
         assert 0.9 < d["M_ratio"] <= 1.0
+
+
+# --- LJ-01 / LJ-02 / NT-01 / DIF-D1 ------------------------------------------
+
+_AL = lambda t: {"unit_system": "SI_mm", "laminae": [
+    {"material": {"type": "isotropic", "E": 70000.0, "nu": 0.33},
+     "angle_deg": 0.0, "thickness": t}]}
+_ADH = {"G": 1000.0, "thickness": 0.2, "shear_strength": 30.0}
+
+
+def test_dissimilar_adherends_give_asymmetric_peak():
+    """Volkersen 비대칭 항 ψ·tanh(X) — 대칭 해만 쓰면 최대 1.67배 과소평가."""
+    d = srv.assess_bonded_lap_joint(_AL(2.0), laminate_2=_AL(0.4), adhesive=_ADH,
+                                    overlap=25.0, load=100.0,
+                                    joint_type="double_lap")["data"]
+    assert d["stiffness_imbalance_psi"] == pytest.approx(2.0 / 3.0, rel=1e-12)
+    # 독립 유한요소(적대 검증 LJ-01)와 6자리 일치
+    assert d["peak_over_average"] == pytest.approx(9.643996, rel=1e-6)
+    assert d["peak_over_average"] > d["peak_over_average_symmetric"]
+    pr = d["profile"]
+    assert pr[-1]["tau"] > 4.0 * pr[0]["tau"]        # 무른 쪽 끝에 몰린다
+
+
+def test_symmetric_adherends_unchanged():
+    """EA₁=EA₂ 면 ψ=0 이라 기존 대칭 해와 같아야 한다."""
+    d = srv.assess_bonded_lap_joint(_AL(2.0), adhesive=_ADH, overlap=25.0,
+                                    load=100.0)["data"]
+    assert d["stiffness_imbalance_psi"] == pytest.approx(0.0, abs=1e-15)
+    assert d["peak_over_average"] == pytest.approx(d["peak_over_average_symmetric"], rel=1e-12)
+    pr = d["profile"]
+    assert pr[0]["tau"] == pytest.approx(pr[-1]["tau"], rel=1e-9)
+
+
+def test_long_overlap_does_not_overflow():
+    """긴 겹침에서 sinh/cosh 가 넘쳐 응답이 통째로 사라지던 것 (LJ-02)."""
+    prev = None
+    for overlap in (200.0, 1000.0, 3000.0, 20000.0):
+        env = srv.assess_bonded_lap_joint(_AL(0.05), adhesive=_ADH, overlap=overlap,
+                                          load=100.0)
+        assert env["errors"] == []
+        d = env["data"]
+        assert math.isfinite(d["tau_peak"]) and d["tau_peak"] > 0
+        assert all(math.isfinite(r["tau"]) for r in d["profile"])
+        if prev is not None:                          # 포화 — 겹침을 늘려도 피크가 그대로
+            assert d["tau_peak"] == pytest.approx(prev, rel=1e-9)
+        prev = d["tau_peak"]
+
+
+def test_volkersen_profile_satisfies_equilibrium():
+    """∫τ dx = P — 비대칭 해에서도 평형이 닫힌다."""
+    from app.solver import lap_joint as LJ
+    for psi in (0.0, 0.5, -0.7):
+        omega, span, load = 0.05, 100.0, 7.0
+        pr = LJ.shear_profile(omega, span, load, psi, 4001)
+        xs = [r["x_over_L"] * span for r in pr]
+        ys = [r["tau"] for r in pr]
+        total = sum((ys[i] + ys[i + 1]) / 2 * (xs[i + 1] - xs[i]) for i in range(len(xs) - 1))
+        assert total == pytest.approx(load, rel=1e-5)
+
+
+_ANISO = {"type": "orthotropic_2d", "E1": 181000.0, "E2": 6000.0, "G12": 2100.0, "nu12": 0.3}
+_UD_HI = {"unit_system": "SI_mm", "laminae": [
+    {"material": _ANISO, "angle_deg": 0.0, "thickness": 0.125}] * 8}
+
+
+@pytest.mark.parametrize("d0", [0.5, 1.0, 1.2, 1.5, 2.0, 3.0])
+def test_notched_ratio_stays_within_physical_bounds(d0):
+    """σ_OH/σ_un ∈ [1/K_T, 1] — 절단급수가 K_T≳9.22 에서 이 상한을 깼다 (NT-01)."""
+    d = srv.assess_notched_strength(_UD_HI, hole_diameter=6.35, d0=d0,
+                                    unnotched_strength=2000.0)["data"]
+    kt = d["K_T"]
+    r = d["notched_strength"]["point_stress"]["ratio"]
+    assert 1.0 / kt <= r <= 1.0
+    assert d["notched_strength"]["point_stress"]["sigma_OH"] <= 2000.0
+
+
+def test_notched_warns_when_series_is_clipped():
+    r = srv.assess_notched_strength(_UD_HI, hole_diameter=6.35, d0=1.5,
+                                    unnotched_strength=2000.0)
+    assert r["data"]["notched_strength"]["point_stress"]["clipped_to_bound"] is True
+    assert any("절단급수" in w["message"] for w in r["warnings"])
+
+
+def test_isotropic_notched_ratio_unchanged():
+    """K_T=3 은 절단급수가 유효한 구간 — 자르기가 개입하면 안 된다."""
+    iso = {"unit_system": "SI_mm", "laminae": [
+        {"material": {"type": "isotropic", "E": 70000.0, "nu": 0.3},
+         "angle_deg": 0.0, "thickness": 1.0}]}
+    d = srv.assess_notched_strength(iso, hole_diameter=6.35, d0=1.0,
+                                    unnotched_strength=500.0)["data"]
+    ps = d["notched_strength"]["point_stress"]
+    assert ps["ratio"] == pytest.approx(0.558391, rel=1e-5)
+    assert "clipped_to_bound" not in ps

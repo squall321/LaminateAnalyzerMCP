@@ -2951,17 +2951,29 @@ def run_moisture_uptake(payload, diffusion, time_s=None, mode: str = "absorption
                              "uptake_fraction": frac, "moisture_content": m_now}
         data["state"]["delta_C_for_thermal_tool"] = (
             m_now if mode == "absorption" else m_now - m_inf)
+        # **탈습은 여집합이다.** 초기 균일 포화 슬래브의 잔류분포는 1 − c_abs 다(Crank).
+        # 전에는 mode 와 무관하게 흡습 프로파일을 그대로 실어 노출면이 포화·중앙이 건조로
+        # 정확히 상하 반전돼 나왔다(적대 검증 DIF-D1).
+        desorb = (mode == "desorption")
         data["profile"] = [
-            {"zeta": zz, "c_over_cinf": DF.concentration_profile(tau, zz)}
+            {"zeta": zz,
+             "c_over_cinf": ((1.0 - DF.concentration_profile(tau, zz)) if desorb
+                             else DF.concentration_profile(tau, zz))}
             for zz in (0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0)]
-        data["profile_note"] = ("ζ=(z+h/2)/h, 0·1 이 노출면. 두께 중앙(ζ=0.5)이 가장 늦게 젖는다 — "
-                                "표면과 중앙의 차이가 클수록 흡습 구배로 인한 휨이 생긴다")
+        data["profile_note"] = (
+            ("ζ=(z+h/2)/h, 0·1 이 노출면. **잔류 수분** 분포다 — 노출면이 먼저 마르고 "
+             "두께 중앙(ζ=0.5)이 가장 늦게 마른다. 두께평균이 remaining_fraction 과 같다"
+             if desorb else
+             "ζ=(z+h/2)/h, 0·1 이 노출면. 두께 중앙(ζ=0.5)이 가장 늦게 젖는다 — "
+             "표면과 중앙의 차이가 클수록 흡습 구배로 인한 휨이 생긴다"))
         # 체인이 넘기는 delta_C 는 **두께 평균**이고 compute_thermal_response 는 그것을
         # 균일하게 건다. 초기에는 프로파일이 극단적으로 불균일해 그 가정이 깨진다
         # (적대 검증 GATE-09) — 균일도를 재서 함께 내고, 낮으면 경고한다.
-        c_surf = DF.concentration_profile(tau, 0.0)
-        c_mid = DF.concentration_profile(tau, 0.5)
-        uniformity = (c_mid / c_surf) if c_surf > 0.0 else 1.0
+        c_surf = data["profile"][0]["c_over_cinf"]
+        c_mid = data["profile"][4]["c_over_cinf"]
+        # 탈습은 중앙이 더 젖어 있으므로 비를 뒤집어 "0~1, 1이 균일" 척도로 맞춘다
+        lo, hi = (c_surf, c_mid) if c_mid >= c_surf else (c_mid, c_surf)
+        uniformity = (lo / hi) if hi > 0.0 else 1.0
         data["state"]["profile_uniformity"] = uniformity
         data["state"]["chain"] = (
             "이 delta_C 를 compute_thermal_response(laminate, delta_C=...) 에 넣으면 흡습 "
@@ -3053,7 +3065,7 @@ def run_partial_composite(payload, span, core_ply=None, include_debug: bool = Fa
     elif not (_num_ok(span)):
         err = item("E100", field="span",
                    detail="span(굽힘 스팬, 길이 단위)은 유한한 양수여야 합니다 — 합성도가 스팬에 "
-                          "강하게 의존합니다(실측 L=1mm 18.3배 vs L=200mm 1.03배)")
+                          "강하게 의존합니다(실측 L=1mm 22.1배 vs L=200mm 1.03배)")
     elif core_ply is not None and (not isinstance(core_ply, int) or isinstance(core_ply, bool)
                                    or not (0 < core_ply < n - 1)):
         err = item("E100", field="core_ply",
@@ -3102,7 +3114,8 @@ def run_partial_composite(payload, span, core_ply=None, include_debug: bool = Fa
                     "thickness": c["thickness"] * f["z"],
                     "G_transverse": c["G_transverse"] * f["modulus"],
                     "angle_deg": si.plies[c["indices"][0]].angle_deg,
-                    "G13_assumed_from_G12": any(si.plies[i].g13 is None for i in c["indices"])}
+                    "G13_assumed_from_G12": any(si.plies[i].g_transverse_assumed
+                                                for i in c["indices"])}
                    for c in res["core_shear"]]
     first = core_blocks[0]
     data = {
@@ -3675,6 +3688,10 @@ def run_required_scale(payload, panel, applied_Nx, target_margin: float = 1.0,
                                 f"{scale_clt:.4g} → {scale:.4g} 로 커진다 — 두껍게 할수록 R_s 도 "
                                 f"s² 로 커져 s³ 법칙이 깨지기 때문이다. CLT 값만 쓰면 "
                                 f"{(scale/scale_clt)**1:.3g}배 얇게 설계된다"))
+    if res.get("boundary"):
+        warn.append(item("W130", field="mode",
+                         detail=f"임계 모드가 스캔 상한({res['mode_scan']})에 걸렸다 — N_cr 이 "
+                                f"비보수적으로 과대평가되어 **필요 배율이 과소 산출**됐을 수 있다"))
     if bp != ("SS", "SS"):
         warn.append(item("W130", field="boundary",
                          detail="단순지지 외 경계는 1항 Rayleigh–Ritz **상계**라 N_cr 을 "
@@ -4180,7 +4197,8 @@ def run_lap_joint(payload, adhesive, overlap, load, laminate_2=None,
 
     ea1, ea2 = _ea(si), _ea(si2)
     omega = LJ.shear_lag_omega(ga, ta, ea1, ea2)
-    ratio = LJ.peak_over_average(omega, l_si)
+    psi = LJ.stiffness_imbalance(ea1, ea2)      # 피착재 강성 불균형 (적대 검증 LJ-01)
+    ratio = LJ.peak_over_average(omega, l_si, psi)
     tau_avg = p_si / l_si
     tau_peak = tau_avg * ratio
     l_sat = LJ.saturation_overlap(omega)
@@ -4196,13 +4214,17 @@ def run_lap_joint(payload, adhesive, overlap, load, laminate_2=None,
         "tau_avg": tau_avg * fm,
         "tau_peak": tau_peak * fm,
         "peak_over_average": ratio,
+        "peak_over_average_symmetric": LJ.peak_over_average(omega, l_si, 0.0),
+        "stiffness_imbalance_psi": psi,
         "profile": [{"x_over_L": r["x_over_L"], "tau": r["tau"] * fm}
-                    for r in LJ.shear_profile(omega, l_si, p_si)],
+                    for r in LJ.shear_profile(omega, l_si, p_si, psi)],
         "saturation_overlap": l_sat / tosi["length"],
         "overlap_efficiency": 1.0 / ratio,
-        "definition": ("Volkersen: ω²=(G_a/t_a)(1/EA₁+1/EA₂), τ(x)=(Pω/2)cosh(ωx)/sinh(ωL/2), "
-                       "τ_peak/τ_avg=(ωL/2)coth(ωL/2). overlap_efficiency = τ_avg/τ_peak — "
-                       "겹침 중 실제로 하중을 나눠 지는 비율"),
+        "definition": ("Volkersen: ω²=(G_a/t_a)(1/EA₁+1/EA₂), X=ωL/2, ψ=(EA₁−EA₂)/(EA₁+EA₂), "
+                       "τ(x)=(Pω/2)[cosh(ωx)/sinh X + ψ·sinh(ωx)/cosh X], "
+                       "τ_peak/τ_avg = X[coth X + |ψ|tanh X]. **피착재가 다르면 분포가 "
+                       "비대칭이다** — ψ 를 빼면 피크를 1+|ψ|tanh²X 배 과소평가한다. "
+                       "overlap_efficiency = τ_avg/τ_peak — 겹침 중 실제로 하중을 나눠 지는 비율"),
     }
     if tau_allow is not None:
         data["margin"] = {"peak": tau_allow / tau_peak if tau_peak > 0 else None,
@@ -4228,9 +4250,13 @@ def run_lap_joint(payload, adhesive, overlap, load, laminate_2=None,
                          detail=f"피크/평균 = {ratio:.3g} — 겹침의 {100 / ratio:.0f}% 만 실효적으로 "
                                 f"하중을 진다. 평균 전단응력으로 설계하면 크게 비보수다"))
     if abs(ea1 - ea2) / max(ea1, ea2) > 0.1:
+        sym = data["peak_over_average_symmetric"]
         warn.append(item("W120", field="adherends",
-                         detail=f"피착재 축강성이 다르다(EA 비 {max(ea1, ea2) / min(ea1, ea2):.3g}) — "
-                                f"Volkersen 은 이를 반영하지만 비대칭 이음은 peel 이 더 커진다"))
+                         detail=f"피착재 축강성이 다르다(EA 비 {max(ea1, ea2) / min(ea1, ea2):.3g}, "
+                                f"ψ={psi:+.3g}) — 분포가 **비대칭**이라 무른 쪽 끝에 피크가 몰린다. "
+                                f"대칭 해로 보면 피크를 {ratio / sym:.3g}배 과소평가한다. "
+                                f"비대칭 이음은 peel 도 더 커지므로 이 전단 결과만으로 "
+                                f"판정하지 말 것"))
     if tau_allow is None:
         warn.append(item("W120", field="adhesive.shear_strength",
                          detail="접착 전단강도가 없어 여유율을 내지 못했다 — materialtwin 의 랩전단 "
@@ -4302,15 +4328,31 @@ def run_notched_strength(payload, hole_diameter, unnotched_strength=None,
         else:
             s_un = float(unnotched_strength)
             blk = {}
+            clipped = []
             if d0 is not None:
-                r = NT.point_stress_ratio(kt, radius, float(d0) * tosi["length"])
+                dd = float(d0) * tosi["length"]
+                r = NT.point_stress_ratio(kt, radius, dd)
                 blk["point_stress"] = {"d0": float(d0), "ratio": r, "sigma_OH": s_un * r}
+                if NT.series_exceeds_bound(kt, radius, dd):
+                    blk["point_stress"]["clipped_to_bound"] = True
+                    clipped.append("point_stress")
             if a0 is not None:
-                r = NT.average_stress_ratio(kt, radius, float(a0) * tosi["length"])
+                aa = float(a0) * tosi["length"]
+                r = NT.average_stress_ratio(kt, radius, aa)
                 blk["average_stress"] = {"a0": float(a0), "ratio": r, "sigma_OH": s_un * r}
+                if NT.series_exceeds_bound(kt, radius, aa, average=True):
+                    blk["average_stress"]["clipped_to_bound"] = True
+                    clipped.append("average_stress")
             blk["unnotched_strength"] = s_un
-            blk["definition"] = ("Whitney–Nuismer. ratio = σ_OH/σ_un. d0/a0→0 이면 1/K_T, "
-                                 "→∞ 이면 1 로 환원된다")
+            blk["definition"] = ("Whitney–Nuismer. ratio = σ_OH/σ_un ∈ [1/K_T, 1]. "
+                                 "d0/a0→0 이면 1/K_T, →∞ 이면 1 로 환원된다")
+            if clipped:
+                warn.append(item("W130", field="notched_strength",
+                                 detail=f"K_T = {kt:.4g} 가 커서 Lekhnitskii σ_y 의 8차 절단급수가 "
+                                        f"물리 상한을 깼다({', '.join(clipped)}) — 자르지 않으면 "
+                                        f"σ_OH > σ_un, 즉 '구멍 뚫은 판이 더 강하다'는 답이 나온다. "
+                                        f"K_T ≳ {NT.KT_SERIES_VALID:.4g} 인 강한 이방 적층에서는 이 "
+                                        f"근사 자체가 유효하지 않으니 σ_OH 를 쓰지 말 것"))
             data["notched_strength"] = blk
             warn.append(item("W130", field="notched_strength",
                              detail="**d0·a0 는 재료·적층별 시험 피팅 상수**이고 답이 여기에 강하게 "
@@ -4469,7 +4511,7 @@ def run_stress_relaxation(payload, times_s, kappa=None, bend_radius=None,
                "peak_ply_stress": peak * f["modulus"]}
         # §19.12 경로 — 순응층의 진짜 역할은 굽힘강성 기여가 아니라 **전단 결합**이다.
         # CLT ABD 만 보면 이완 효과가 0에 가깝지만(실측 0.0%), 부분합성으로 보면 합성도가
-        # 73%→18% 로 무너져 유효 굽힘강성이 0.37배가 된다. 순응층이 있으면 함께 낸다.
+        # 86%→22% 로 무너져 유효 굽힘강성이 0.31배가 된다. 순응층이 있으면 함께 낸다.
         if core_runs and span_si is not None:
             # **횡전단은 g13(각도 변환 포함)이지 면내 G12 가 아니다** — 전에는 plies_t[i][2]
             # (=G12)를 써서 같은 적층에서 assess_partial_composite_bending 과 3.3배

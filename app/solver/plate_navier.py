@@ -233,7 +233,10 @@ BOUNDARIES = ("simply_supported", "clamped")
 
 CC_LAMBDA_STEPS = 200      # 고정 이분 반복수
 CC_QUAD_NODES = 8001       # 고정 Simpson 노드수 (홀수)
-CLAMPED_MODE_LIMIT = 8     # 고차 모드는 cosh 가 커져 수치가 나빠진다
+CLAMPED_MODE_LIMIT = 40    # 세장 판은 임계 m 이 8 을 훌쩍 넘는다 (적대 검증 PC2-02)
+# 상한 8 은 "고차 모드는 cosh 가 커져 수치가 나빠진다"는 우려에서 나왔는데, 모듈 자체
+# 자가검증(q = λ⁴)이 n=60 에서도 상대오차 1e-9 로 성립한다. 8 에 묶어 두면 세장 패널에서
+# 최소가 경계에 걸려 필요 두께 배율이 1.39배 과소 산출됐다.
 _PQ_CACHE: dict[tuple[str, int], tuple[float, float, float]] = {}
 
 

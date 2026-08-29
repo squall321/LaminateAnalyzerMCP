@@ -325,3 +325,36 @@ def test_gate_does_not_claim_y_compression_when_both_are_tension():
     msgs = " ".join(w["message"] for w in r["warnings"])
     assert "y방향만 압축" not in msgs
     assert "둘 다 인장" in msgs and "전단 좌굴을 풀지" in msgs
+
+
+# --- DIF-D1: 탈습 프로파일은 흡습의 여집합이다 --------------------------------
+
+@pytest.mark.parametrize("tau", [0.05, 0.1, 0.3, 1.0])
+def test_desorption_profile_is_the_complement(tau):
+    r = srv.compute_moisture_uptake(_lam([0, 90, 90, 0], mat=_WET), diffusion=_DIFF,
+                                    time_s=_time_for_tau(tau), mode="desorption")["data"]
+    a = srv.compute_moisture_uptake(_lam([0, 90, 90, 0], mat=_WET), diffusion=_DIFF,
+                                    time_s=_time_for_tau(tau))["data"]
+    for pd, pa in zip(r["profile"], a["profile"]):
+        assert pd["c_over_cinf"] == pytest.approx(1.0 - pa["c_over_cinf"], abs=1e-12)
+    # 노출면이 먼저 마르고 중앙이 가장 늦게 마른다
+    assert r["profile"][0]["c_over_cinf"] < r["profile"][4]["c_over_cinf"]
+
+
+def test_desorption_profile_average_matches_remaining_fraction():
+    """두께평균이 remaining_fraction 과 맞아야 한다 — 반전 상태에선 22배 어긋났다."""
+    from app.solver import diffusion as DF
+    tau, n = 0.3, 4001
+    vals = [1.0 - DF.concentration_profile(tau, i / (n - 1)) for i in range(n)]
+    avg = sum((vals[i] + vals[i + 1]) / 2 for i in range(n - 1)) / (n - 1)   # 사다리꼴
+    d = srv.compute_moisture_uptake(_lam([0, 90, 90, 0], mat=_WET), diffusion=_DIFF,
+                                    time_s=_time_for_tau(tau), mode="desorption")["data"]
+    assert d["state"]["remaining_fraction"] == pytest.approx(avg, rel=1e-4)
+
+
+def test_desorption_start_is_uniformly_saturated():
+    d = srv.compute_moisture_uptake(_lam([0, 90, 90, 0], mat=_WET), diffusion=_DIFF,
+                                    time_s=0.0, mode="desorption")["data"]
+    inner = [p["c_over_cinf"] for p in d["profile"][1:-1]]
+    assert all(v == pytest.approx(1.0, abs=1e-12) for v in inner)
+    assert d["profile"][0]["c_over_cinf"] == pytest.approx(0.0, abs=1e-12)

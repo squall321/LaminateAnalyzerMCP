@@ -17,6 +17,11 @@ from __future__ import annotations
 import math
 
 SERIES_TERMS = 500      # 고정 항수 (사양의 일부)
+# **τ 가 작으면 급수를 쓰지 않는다.** 500항으로 수렴하려면 τ ≳ 1e-6 이 필요한데
+# (τ=1e-8 에서 실측 97% 오차) 그 영역은 반무한체 폐형해가 오히려 **정확**하다
+# (τ ≤ 0.01 에서 수렴 급수와 배정도 한계까지 일치, τ=0.05 에서도 0.11%).
+# 적응 판정이 아니라 고정 문턱이므로 결정론 계약은 그대로다 (적대 검증 DIF-01).
+TAU_SERIES_MIN = 0.01
 BISECT_STEPS = 200      # 고정 이분 반복수
 TAU_MAX = 10.0          # 역산 상한 (τ=10 이면 사실상 완전 포화)
 
@@ -25,6 +30,8 @@ def uptake_fraction(tau: float) -> float:
     """M(t)/M∞ — 무차원 시간 τ = D·t/h² 의 함수."""
     if tau <= 0.0:
         return 0.0
+    if tau < TAU_SERIES_MIN:
+        return min(1.0, early_time_fraction(tau))
     s = 0.0
     for n in range(SERIES_TERMS):
         m = 2 * n + 1
@@ -39,6 +46,10 @@ def concentration_profile(tau: float, zeta: float) -> float:
     """c(z,t)/c∞ — ζ = (z + h/2)/h ∈ [0,1] (0·1 이 노출면)."""
     if tau <= 0.0:
         return 1.0 if zeta <= 0.0 or zeta >= 1.0 else 0.0
+    if tau < TAU_SERIES_MIN:
+        # 반무한체 중첩 — 양 노출면에서 들어온 두 확산 전선의 합
+        r = 2.0 * math.sqrt(tau)
+        return min(1.0, max(0.0, math.erfc(zeta / r) + math.erfc((1.0 - zeta) / r)))
     s = 0.0
     for n in range(SERIES_TERMS):
         m = 2 * n + 1
@@ -66,7 +77,11 @@ def tau_for_fraction(target: float) -> float | None:
 
 
 def early_time_fraction(tau: float) -> float:
-    """초기 √t 점근 M/M∞ ≈ 4·√(τ/π) — 급수해의 검증용 독립 경로."""
+    """초기 √t 해 M/M∞ = 4·√(τ/π).
+
+    '근사'라는 이름이지만 τ ≲ 0.01 에서는 보정항이 exp(−1/(4τ)) 규모라 사실상 **정확**하다.
+    uptake_fraction 이 그 구간에서 이 식을 쓴다(급수가 되레 못 미친다).
+    """
     return 4.0 * math.sqrt(max(tau, 0.0) / math.pi)
 
 

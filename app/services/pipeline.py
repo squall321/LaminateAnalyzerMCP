@@ -638,20 +638,33 @@ def run_thermal(payload, delta_t=None, panel=None, delta_c=None,
                        "이 그대로 작용한다** — 팽창이면 압축이라 좌굴을 유발한다"),
     }
     n_restr = -N_f                       # 완전 면내 구속 시 실제로 작용하는 하중
-    if panel is not None and float(n_restr[0]) < 0.0:
+    nrx, nry = float(n_restr[0]), float(n_restr[1])
+    # **y축만 압축인 경우도 푼다.** 전에는 x축 압축만 검사해 [90] 계열 적층·이방 CTE 에서
+    # 완전히 침묵했다(적대 검증 GATE-03). x↔y 를 바꾸면 D11↔D22·a↔b 만 바뀐다.
+    swap_xy = nrx >= 0.0 > nry
+    if panel is not None and (nrx < 0.0 or nry < 0.0):
         from app.solver import plate_navier as NAV
         d_use, _appl, _hh, _kk = _bending_stiffness_for_navier(si, warnings)
-        ratio = float(n_restr[1] / n_restr[0]) if n_restr[0] != 0.0 else 0.0
-        bres = NAV.buckling_ncr(d_use, lx_si, ly_si, ratio)
+        if swap_xy:
+            d_use = np.array(d_use, dtype=float).copy()
+            d_use[0, 0], d_use[1, 1] = d_use[1, 1], d_use[0, 0]
+            n_c, n_o, la, lb = nry, nrx, ly_si, lx_si
+        else:
+            n_c, n_o, la, lb = nrx, nry, lx_si, ly_si
+        ratio = float(n_o / n_c) if n_c != 0.0 else 0.0
+        bres = NAV.buckling_ncr(d_use, la, lb, ratio)
         if bres["N_cr"] is not None:
-            factor = bres["N_cr"] / abs(float(n_restr[0]))
+            factor = bres["N_cr"] / abs(n_c)
             blk = {
                 "N_cr": bres["N_cr"] * f["A"],
-                "restrained_Nx": float(n_restr[0]) * f["A"],
+                "restrained_Nx": nrx * f["A"],
+                "restrained_Ny": nry * f["A"],
+                "compressed_axis": "y" if swap_xy else "x",
                 "load_factor_to_buckling": factor,
                 "mode": {"m": bres["mode_m"], "n": bres["mode_n"]},
                 "definition": ("면내 **완전 구속** 극단. load_factor = N_cr/|N_구속| — 1보다 작으면 "
-                               "이 ΔT/ΔC 에서 이미 좌굴한다. 실제 구속은 자유와 완전구속 사이다"),
+                               "이 ΔT/ΔC 에서 이미 좌굴한다. 실제 구속은 자유와 완전구속 사이다. "
+                               "압축이 y축이면 x↔y 를 바꿔(D11↔D22, a↔b) 같은 식으로 푼다"),
             }
             if dT != 0.0 and dC == 0.0:
                 blk["delta_T_critical"] = abs(dT) * factor
@@ -666,6 +679,11 @@ def run_thermal(payload, delta_t=None, panel=None, delta_c=None,
                 warnings.append(item("W130", field="restrained_buckling",
                                      detail=f"면내 완전 구속 시 좌굴 여유가 {factor:.3g} 배로 얇다 — "
                                             f"구속 조건을 확인할 것"))
+            if abs(float(n_restr[2])) > 1e-9 * max(abs(nrx), abs(nry), 1e-300):
+                warnings.append(item("W130", field="restrained_buckling",
+                                     detail="열 구속 반력에 면내 전단 Nxy 성분이 있다(비대칭·비평형 "
+                                            "적층) — 이 서버는 전단 좌굴을 풀지 못해 판정에서 "
+                                            "빠져 있다. 실제 임계 ΔT 는 더 낮을 수 있다"))
 
     extra = [
         "자유변형 해석 가정: 선형 CTE/CME(온도·수분 무관 — Tg 이상 α 급변 미반영), 자유 경계·소변형",
@@ -1012,7 +1030,7 @@ def run_ply_stresses(payload, loads=None, delta_t=None, detail: str = "auto",
 
     # §19.6 지배모드 게이트 — 압축이면 좌굴이 먼저 올 수 있다(실측 최대 410배 모순)
     gov = _stability_gate(si, N_si, panel, warnings,
-                          r_strength=(fpf[0] if fpf is not None else None))
+                          r_strength=(fpf[0] if fpf is not None else None), m_si=M_si)
     if gov is not None:
         data["governing_mode"] = gov
 
@@ -2326,7 +2344,7 @@ def run_nonlinear_shear(payload, loads=None, include_debug: bool = False) -> dic
                      include_debug=include_debug, t0=t0)
 
 
-def _stability_gate(si, n_si, panel, warnings, r_strength=None):
+def _stability_gate(si, n_si, panel, warnings, r_strength=None, m_si=None):
     """압축 하중일 때 좌굴을 함께 보게 만드는 지배모드 게이트 (§19.6).
 
     적대 검증 실측: [0/90]s h=0.5mm 에 Nx=−60 N/mm 를 걸면 recover_ply_stresses 가
@@ -2342,7 +2360,13 @@ def _stability_gate(si, n_si, panel, warnings, r_strength=None):
     # **주응력으로 판정한다.** Nx·Ny 만 보면 순수 전단(Nxy)에서 침묵하는데, 순수 전단은
     # ±45° 주축에서 크기 |Nxy| 의 압축이라 얇은 판은 반드시 좌굴한다 — 적대 검증에서
     # 같은 응력상태를 주축으로 쓰면 좌굴 지배(10.9배 모순)가 나오는 것이 확인됐다.
-    scale = max(abs(nx), abs(ny), abs(nxy))
+    # 하중 규모에는 **모멘트가 만드는 힘 규모 M/h 도 넣는다.** N 만 기준으로 삼으면
+    # 굽힘이 지배하는 변위 제어 체인(N ≈ −7e-33, M = 0.5)에서 문턱이 같이 작아져
+    # 수치 잔여를 압축으로 오인한다(적대 검증 GATE-06).
+    _, _, _, _, h_lam = _abd_of_plies(si.plies)
+    m_scale = (max(abs(float(v)) for v in m_si) / h_lam
+               if m_si is not None and h_lam > 0 else 0.0)
+    scale = max(abs(nx), abs(ny), abs(nxy), m_scale)
     if scale <= 0.0:
         return None
     mid, rad = 0.5 * (nx + ny), math.hypot(0.5 * (nx - ny), nxy)
@@ -2828,15 +2852,35 @@ def run_moisture_uptake(payload, diffusion, time_s=None, mode: str = "absorption
                              "uptake_fraction": frac, "moisture_content": m_now}
         data["state"]["delta_C_for_thermal_tool"] = (
             m_now if mode == "absorption" else m_now - m_inf)
-        data["state"]["chain"] = ("이 delta_C 를 compute_thermal_response(laminate, delta_C=...) 에 "
-                                  "넣으면 흡습 변형·곡률·판 휨까지 이어진다")
         data["profile"] = [
             {"zeta": zz, "c_over_cinf": DF.concentration_profile(tau, zz)}
             for zz in (0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0)]
         data["profile_note"] = ("ζ=(z+h/2)/h, 0·1 이 노출면. 두께 중앙(ζ=0.5)이 가장 늦게 젖는다 — "
                                 "표면과 중앙의 차이가 클수록 흡습 구배로 인한 휨이 생긴다")
+        # 체인이 넘기는 delta_C 는 **두께 평균**이고 compute_thermal_response 는 그것을
+        # 균일하게 건다. 초기에는 프로파일이 극단적으로 불균일해 그 가정이 깨진다
+        # (적대 검증 GATE-09) — 균일도를 재서 함께 내고, 낮으면 경고한다.
+        c_surf = DF.concentration_profile(tau, 0.0)
+        c_mid = DF.concentration_profile(tau, 0.5)
+        uniformity = (c_mid / c_surf) if c_surf > 0.0 else 1.0
+        data["state"]["profile_uniformity"] = uniformity
+        data["state"]["chain"] = (
+            "이 delta_C 를 compute_thermal_response(laminate, delta_C=...) 에 넣으면 흡습 "
+            "변형·곡률·판 휨까지 이어진다. **다만 그 도구는 delta_C 를 두께에 걸쳐 균일하게 "
+            "건다** — profile_uniformity(중앙/표면 농도비)가 1 에 가까울 때만 맞다. "
+            "초기 흡습에서는 표면만 젖어 있어 실제로는 구배가 만드는 휨이 따로 생긴다")
+        if uniformity < 0.8:
+            warn_uniform = (
+                f"흡습 프로파일이 불균일하다(중앙/표면 = {uniformity:.3g}, τ = {tau:.3g}) — "
+                f"delta_C_for_thermal_tool 은 두께 **평균**이고 compute_thermal_response 는 "
+                f"그것을 균일하게 걸므로 **구배가 만드는 휨이 통째로 빠진다**. "
+                f"τ ≳ 0.5 (거의 균일) 이후이거나, 구배가 중요하면 층별로 나눠 걸 것")
+        else:
+            warn_uniform = None
 
     warn = list(warnings)
+    if time_s is not None and warn_uniform is not None:
+        warn.append(item("W130", field="state.delta_C_for_thermal_tool", detail=warn_uniform))
     warn.append(item("W130", field="model",
                      detail="Fickian(단순 확산) 가정 — 실제 에폭시는 2단계 흡습·비Fickian 거동을 "
                             "보일 수 있고, D 는 온도·수분율에 의존한다. 장시간 외삽은 신중할 것"))
@@ -3112,6 +3156,21 @@ def run_prescribed_curvature(payload, kappa=None, bend_radius=None, bend_axis: s
             row[label] = {"epsilon_xyz": e_xyz.tolist(),
                           "epsilon_1": float(e12[0]), "epsilon_2": float(e12[1])}
         per_ply.append(row)
+    # §19.15 항복 게이트 — **변위 제어에서 특히 중요하다**. 곡률을 지정하면 응력이
+    # 곧장 따라오르므로 굽힘반경만 조이면 쉽게 항복을 넘긴다. 전에는 이 게이트가
+    # recover_ply_stresses 에만 있어 여기서는 조용히 지나갔다(적대 검증 GATE-08).
+    yielded_pc = []
+    for k, p_ in enumerate(si.plies):
+        if p_.sigma_y is None:
+            continue
+        z_lo, z_hi = float(z[k]), float(z[k + 1])
+        peak = max(abs(FAIL.von_mises_plane_stress(
+            qbars[k] @ (eps_res + zv * kap_res)))
+            for zv in (z_lo, 0.5 * (z_lo + z_hi), z_hi))
+        if peak >= p_.sigma_y:
+            yielded_pc.append({"ply": k, "von_mises": peak * fu["modulus"],
+                               "sigma_y": p_.sigma_y * fu["modulus"],
+                               "ratio": peak / p_.sigma_y})
     trunc = None
     if len(per_ply) > config.SUMMARY_PLY_LIMIT:
         per_ply = per_ply[:config.SUMMARY_TOP_N]
@@ -3136,10 +3195,22 @@ def run_prescribed_curvature(payload, kappa=None, bend_radius=None, bend_axis: s
         "surface_strain": {
             "bottom": (eps_res + float(z[0]) * kap_res).tolist(),
             "top": (eps_res + float(z[-1]) * kap_res).tolist(),
-            "note": "assess_crack_shielding 의 applied_strain 에 넣을 값 — 손으로 (z−z_ns)/R 을 "
-                    "계산하지 말 것",
+            # assess_crack_shielding.applied_strain 은 **스칼라**다. 3벡터를 그대로 넘기면
+            # E100 이 나서 문서에 적힌 체인이 끊겼다(적대 검증 GATE-07).
+            "applied_strain_x": {
+                "bottom": float(eps_res[0] + float(z[0]) * kap_res[0]),
+                "top": float(eps_res[0] + float(z[-1]) * kap_res[0]),
+            },
+            "note": "bottom·top 은 [εx, εy, γxy] 3벡터다. assess_crack_shielding 의 "
+                    "applied_strain 은 **스칼라**이므로 applied_strain_x 의 해당 면 값을 "
+                    "넘길 것 — 손으로 (z−z_ns)/R 을 계산하지 말 것",
         },
         "per_ply_strain": per_ply,
+        **({"yielding": {"plies": yielded_pc,
+                         "definition": "평면응력 von Mises 의 ply 내 3점 최대값 대비 σ_y"}}
+           if yielded_pc else
+           ({"yielding": {"plies": [], "note": "항복강도가 주어진 ply 는 모두 탄성 범위 안이다"}}
+            if any(p_.sigma_y is not None for p_ in si.plies) else {})),
         **({"truncation": trunc} if trunc else {}),
         "definition": ("K[ε⁰;κ] = [N;M] 의 지정/미지 자유도 분할. 지정된 자유도는 일반변형률이 "
                        "알려지고 대응 일반력이 반력이 된다. 대칭 적층에서 κ 를 전부 지정하면 "
@@ -3147,6 +3218,13 @@ def run_prescribed_curvature(payload, kappa=None, bend_radius=None, bend_axis: s
     }
 
     warn = list(warnings)
+    if yielded_pc:
+        worst_pc = max(yielded_pc, key=lambda r: r["ratio"])
+        warn.append(item("W130", field="yielding",
+                         detail=f"laminae[{worst_pc['ply']}] 의 von Mises 가 항복강도의 "
+                                f"{worst_pc['ratio']:.3g}배다 — **완전탄성 가정이 깨졌다**. "
+                                f"지정한 곡률이 이 재료에 너무 크다. 이 서버는 소성을 "
+                                f"모델링하지 않으므로 equivalent_loads 도 과대평가다"))
     over = data["naive_D_kappa"]["overprediction_Mx"]
     if over is not None and abs(over - 1.0) > 0.05:
         warn.append(item("W130", field="naive_D_kappa",
@@ -3295,7 +3373,9 @@ def run_failure_envelope(payload, plane: str = "Nx-Ny", magnitude=None,
                     "critical_ply": weakest["critical_ply"], "mode": weakest["mode"]},
         "strongest": {"angle_deg": strongest["angle_deg"],
                       "failure_load": strongest["failure_load"]},
-        "anisotropy_ratio": strongest["strength_ratio"] / weakest["strength_ratio"],
+        # weakest R = 0 이면(열잔류만으로 이미 파손면 위) 나눗셈이 터져 E501 이 나갔다.
+        "anisotropy_ratio": (strongest["strength_ratio"] / weakest["strength_ratio"]
+                             if weakest["strength_ratio"] > 0.0 else None),
         "delta_T": dT if dT != 0.0 else None,
         "definition": (f"{ENVELOPE_DIRECTIONS}방향 고정 격자(5도 간격). 방향마다 단위 하중을 걸고 "
                        f"Tsai-Wu 강도비 R 을 구해 failure_load = R×방향벡터 로 포락선을 만든다. "
@@ -3305,6 +3385,12 @@ def run_failure_envelope(payload, plane: str = "Nx-Ny", magnitude=None,
     warn.append(item("W130", field="points",
                      detail=f"{ENVELOPE_DIRECTIONS}방향 격자라 각도 해상도가 5도다 — 뾰족한 "
                             f"포락선의 꼭짓점은 놓칠 수 있다"))
+    zero_dirs = [p["angle_deg"] for p in points if p["strength_ratio"] <= 0.0]
+    if zero_dirs:
+        warn.append(item("W130", field="points",
+                         detail=f"방향 {zero_dirs[:5]}{'…' if len(zero_dirs) > 5 else ''} 에서 "
+                                f"강도비가 0 이다 — **열잔류만으로 이미 파손면 위**라 그 방향은 "
+                                f"어떤 크기의 하중도 견디지 못한다. 이방비는 계산하지 않았다"))
     if dT == 0.0 and any(p_.has_cte for p_ in si.plies):
         warn.append(item("W130", field="delta_T",
                          detail="CTE 가 있는데 delta_T 가 없다 — 경화 잔류가 빠진 포락선이다"))

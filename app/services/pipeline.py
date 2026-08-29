@@ -2572,8 +2572,12 @@ def run_free_edge_delamination(payload, loads=None, fracture=None,
             "between": governing["between"],
             "G": governing["G"],
             "dominant_driver": governing["dominant_driver"],
-            **({"onset_strain": governing["onset_strain"], "margin": governing["margin"]}
-               if g_c is not None else {}),
+            # G_Ic/G_IIc 경로에서도 개시 변형률·여유가 있다 — 전에는 g_c 일 때만 실어
+            # 혼합모드 입력에서 headline 이 조용히 비었다(적대 검증 NC-05).
+            **({"onset_strain": governing["onset_strain"], "margin": governing["margin"],
+                **({"onset_strain_range": governing["onset_strain_range"]}
+                   if governing.get("onset_strain_range") else {})}
+               if governing.get("onset_strain") is not None else {}),
         }),
         "definition": ("O'Brien: G = (ε_x²·h/2)·(E_LAM − E*), E* = ΣE_i·t_i/h (박리로 갈라진 "
                        "부분적층의 두께 가중 평균). 박리 길이에 무관한 정상상태 값이라 "
@@ -2593,6 +2597,12 @@ def run_free_edge_delamination(payload, loads=None, fracture=None,
         warn.append(item("W130", field="fracture.G_c",
                          detail="단일 G_c 를 썼다 — 층간 인성은 모드 의존이 크다(보통 G_Ic ≪ G_IIc). "
                                 "G_Ic·G_IIc 를 주면 계면별로 혼합모드를 판정한다"))
+    if governing is not None and governing.get("margin") is not None and governing["margin"] < 1.0:
+        warn.append(item("W130", field="governing_interface",
+                         detail=f"**계면 {governing['interface']} 의 자유단 박리 여유가 "
+                                f"{governing['margin']:.3g} 로 1 미만**이다 — 작용 변형률이 개시 "
+                                f"변형률 {governing['onset_strain']:.4g} 를 넘었다. 면내 강도 "
+                                f"판정만으로 안전하다고 보고하지 말 것"))
     unknown_mix = [r["interface"] for r in interfaces if r["mode_mix"]["basis"] == "unknown"]
     if unknown_mix and g_ic is not None:
         warn.append(item("W130", field="mode_mix",
@@ -2859,26 +2869,27 @@ def run_moisture_uptake(payload, diffusion, time_s=None, mode: str = "absorption
 def _compliant_core_gate(si, span_si, warnings, label):
     """순응 중간층이 있으면 CLT 굽힘강성이 과대평가임을 알린다 (§19.12 게이트)."""
     from app.solver import partial_composite as PC
-    k = PC.detect_compliant_core(si.plies)
-    if k is None or span_si is None or span_si <= 0:
+    span_core = PC.detect_compliant_core(si.plies)
+    if span_core is None or span_si is None or span_si <= 0:
         return None
+    lo, hi = span_core
     qbars = [MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
              for p_ in si.plies]
     th = list(si.thicknesses)
     A, B, D, _z, _h = _abd_of_plies(si.plies)
-    ea1, ei1 = PC.sublaminate_ea_ei(qbars, th, 0, k)
-    ea2, ei2 = PC.sublaminate_ea_ei(qbars, th, k + 1, len(th))
-    _ea_c, ei_c = PC.sublaminate_ea_ei(qbars, th, k, k + 1)
-    core = si.plies[k]
-    g_core = core.g13 if core.g13 is not None else core.G12
+    ea1, ei1 = PC.sublaminate_ea_ei(qbars, th, 0, lo)
+    ea2, ei2 = PC.sublaminate_ea_ei(qbars, th, hi + 1, len(th))
+    _ea_c, ei_c = PC.sublaminate_ea_ei(qbars, th, lo, hi + 1)
+    g_core, t_core = PC.core_shear_and_thickness(si.plies, lo, hi)
     res = PC.composite_action(ea1, ei1, ea2, ei2, ei_c, float(D[0, 0]),
-                              g_core, core.thickness, span_si)
+                              g_core, t_core, span_si)
     f = res.get("composite_action")
     if f is None or f >= 0.9:
         return res
     over = res["EI_full"] / res["EI_effective"] if res["EI_effective"] > 0 else None
+    k_txt = f"laminae[{lo}]" if lo == hi else f"laminae[{lo}..{hi}]"
     warnings.append(item("W130", field="laminae",
-                         detail=f"laminae[{k}] 가 이웃보다 10배 이상 무른 순응층이다 — {label} 기준 "
+                         detail=f"{k_txt} 가 이웃보다 10배 이상 무른 순응층이다 — {label} 기준 "
                                 f"합성도 {f * 100:.1f}% 로 **CLT 굽힘강성이 "
                                 f"{over:.3g}배 과대평가**된다. assess_partial_composite_bending "
                                 f"로 확인할 것"))
@@ -2912,8 +2923,9 @@ def run_partial_composite(payload, span, core_ply=None, include_debug: bool = Fa
                          unit_system=si.unit_system, include_debug=include_debug, t0=t0)
 
     auto = core_ply is None
-    k = PC.detect_compliant_core(si.plies) if auto else int(core_ply)
-    if k is None:
+    span_core = (PC.detect_compliant_core(si.plies) if auto
+                 else (int(core_ply), int(core_ply)))
+    if span_core is None:
         return ENV.build(data=None, errors=[item("E100", field="core_ply",
                                                  detail="이웃보다 10배 이상 무른 중간층을 찾지 못했습니다 — "
                                                         "순응층이 없으면 CLT 가 이미 맞습니다. "
@@ -2921,18 +2933,19 @@ def run_partial_composite(payload, span, core_ply=None, include_debug: bool = Fa
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
 
+    lo, hi = span_core
+    core = si.plies[lo]
     span_si = float(span) * units.TO_SI[si.unit_system]["length"]
     qbars = [MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
              for p_ in si.plies]
     th = list(si.thicknesses)
     A, B, D, _z, h = _abd_of_plies(si.plies)
-    ea1, ei1 = PC.sublaminate_ea_ei(qbars, th, 0, k)
-    ea2, ei2 = PC.sublaminate_ea_ei(qbars, th, k + 1, len(th))
-    _ea_c, ei_c = PC.sublaminate_ea_ei(qbars, th, k, k + 1)
-    core = si.plies[k]
-    g_core = core.g13 if core.g13 is not None else core.G12
+    ea1, ei1 = PC.sublaminate_ea_ei(qbars, th, 0, lo)
+    ea2, ei2 = PC.sublaminate_ea_ei(qbars, th, hi + 1, len(th))
+    _ea_c, ei_c = PC.sublaminate_ea_ei(qbars, th, lo, hi + 1)
+    g_core, t_core = PC.core_shear_and_thickness(si.plies, lo, hi)
     res = PC.composite_action(ea1, ei1, ea2, ei2, ei_c, float(D[0, 0]),
-                              g_core, core.thickness, span_si)
+                              g_core, t_core, span_si)
     if res.get("composite_action") is None:
         return ENV.build(data=None, errors=[item("E100", field="laminate",
                                                  detail=f"부분합성을 계산할 수 없습니다: {res.get('reason')}")],
@@ -2943,11 +2956,14 @@ def run_partial_composite(payload, span, core_ply=None, include_debug: bool = Fa
     fac = res["composite_action"]
     over = res["EI_full"] / res["EI_effective"] if res["EI_effective"] > 0 else None
     data = {
-        "core_ply": {"index": k, "angle_deg": core.angle_deg,
-                     "thickness": core.thickness * f["z"],
+        "core_ply": {"index": lo, "indices": list(range(lo, hi + 1)),
+                     "angle_deg": core.angle_deg,
+                     "thickness": t_core * f["z"],
                      "G_transverse": g_core * f["modulus"],
                      "detected": "auto" if auto else "explicit",
-                     "G13_assumed_from_G12": core.g13 is None},
+                     "merged_plies": hi - lo + 1,
+                     "G13_assumed_from_G12": any(si.plies[i].g13 is None
+                                                 for i in range(lo, hi + 1))},
         "span": float(span),
         "composite_action": fac,
         "EI_layered": res["EI_layered"] * f["D"],
@@ -3489,7 +3505,10 @@ def run_sandwich_local(payload, core, applied=None, shear=None, core_ply=None,
                          unit_system=si.unit_system, include_debug=include_debug, t0=t0)
 
     auto = core_ply is None
-    k_core = PC.detect_compliant_core(si.plies) if auto else int(core_ply)
+    _span_core = (PC.detect_compliant_core(si.plies) if auto
+                  else (int(core_ply), int(core_ply)))
+    k_core = None if _span_core is None else _span_core[0]
+    k_hi = None if _span_core is None else _span_core[1]
     if k_core is None:
         return ENV.build(data=None, errors=[item("E100", field="core_ply",
                                                  detail="이웃보다 10배 이상 무른 코어를 찾지 못했습니다 — "
@@ -3506,11 +3525,12 @@ def run_sandwich_local(payload, core, applied=None, shear=None, core_ply=None,
     th = list(si.thicknesses)
     z = ABD.z_coordinates(th)
     ea1, ei1 = PC.sublaminate_ea_ei(qbars, th, 0, k_core)
-    ea2, ei2 = PC.sublaminate_ea_ei(qbars, th, k_core + 1, n)
+    ea2, ei2 = PC.sublaminate_ea_ei(qbars, th, k_hi + 1, n)
     t1 = float(sum(th[:k_core]))
-    t2 = float(sum(th[k_core + 1:]))
+    t2 = float(sum(th[k_hi + 1:]))
+    t_core_total = float(sum(th[k_core:k_hi + 1]))
     ef1, ef2 = ea1 / t1, ea2 / t2                 # 면재 축방향 유효 탄성계수
-    d_faces = 0.5 * (t1 + t2) + th[k_core]        # 면재 중심 거리
+    d_faces = 0.5 * (t1 + t2) + t_core_total      # 면재 중심 거리
     nu_face = si.plies[0].nu12
 
     f = units.FROM_SI[si.unit_system]
@@ -3549,7 +3569,7 @@ def run_sandwich_local(payload, core, applied=None, shear=None, core_ply=None,
         from app.solver import failure as FAIL
         peak = 0.0
         peak_ply = None
-        for k in list(range(0, k_core)) + list(range(k_core + 1, n)):
+        for k in list(range(0, k_core)) + list(range(k_hi + 1, n)):
             for zv in (float(z[k]), float(z[k + 1])):
                 sx = float(FAIL.ply_stresses_at(qbars[k], eps0, kappa, zv)[0])
                 if -sx > peak:                   # 압축만 주름·딤플링을 유발한다
@@ -3574,26 +3594,35 @@ def run_sandwich_local(payload, core, applied=None, shear=None, core_ply=None,
         modes["core_shear"] = blk
 
     # 지배 모드 판정 — 면재 압축응력 대비 여유
-    governing = None
+    cand: dict[str, float] = {}
     if face_stress is not None and face_stress["max_compressive"] > 0:
         s_app = face_stress["max_compressive"]
-        cand = {"face_wrinkling": modes["face_wrinkling"]["sigma_conservative"] / s_app}
+        cand["face_wrinkling"] = modes["face_wrinkling"]["sigma_conservative"] / s_app
         if "intracell_dimpling" in modes:
             cand["intracell_dimpling"] = modes["intracell_dimpling"]["sigma"] / s_app
-        strengths = [p_.strength for p_ in si.plies if p_.strength is not None]
-        if strengths:
-            cand["face_material"] = min(s[1] for s in strengths) * f["modulus"] / s_app
-        name = min(cand, key=lambda k: cand[k])
+        # **코어 강도를 섞지 않는다** — 코어는 면재 압축응력을 받는 층이 아니다.
+        # 전 ply 최소를 쓰면 무른 코어의 Xc 가 들어와 지배 모드가 face_material 로
+        # 뒤집히고 "이미 파손"이라는 거짓 판정이 난다(적대 검증 GATE-04).
+        face_strengths = [si.plies[k].strength for k in range(n)
+                          if not (k_core <= k <= k_hi) and si.plies[k].strength is not None]
+        if face_strengths:
+            cand["face_material"] = min(s[1] for s in face_strengths) * f["modulus"] / s_app
+    # 코어 전단은 면재 압축이 없어도(순수 굽힘·인장) 독립적으로 지배할 수 있다 —
+    # 전에는 face_stress 가 없으면 governing 자체가 사라져 조용히 빠졌다(NC-03).
+    if "core_shear" in modes and modes["core_shear"].get("margin") is not None:
+        cand["core_shear"] = modes["core_shear"]["margin"]
+    governing = None
+    if cand:
+        name = min(cand, key=lambda k: (cand[k], k))
         governing = {"mode": name, "margin": cand[name], "margins": cand,
-                     "definition": "여유 = 국부 파손 응력 ÷ 면재 최대 압축응력 (보수 k 기준)"}
-        if "core_shear" in modes and modes["core_shear"].get("margin") is not None:
-            governing["margins"]["core_shear"] = modes["core_shear"]["margin"]
-            if modes["core_shear"]["margin"] < governing["margin"]:
-                governing["mode"] = "core_shear"
-                governing["margin"] = modes["core_shear"]["margin"]
+                     "basis": sorted(cand),
+                     "definition": "여유 = 국부 파손 응력 ÷ 면재 최대 압축응력 (보수 k 기준). "
+                                   "코어 전단 여유는 τ_allow/τ_c 로 따로 계산해 함께 겨룬다. "
+                                   "면재 재료강도에는 코어 ply 를 넣지 않는다"}
 
     data = {
-        "core_ply": {"index": k_core, "thickness": th[k_core] * f["z"],
+        "core_ply": {"index": k_core, "indices": list(range(k_core, k_hi + 1)),
+                     "thickness": t_core_total * f["z"],
                      "detected": "auto" if auto else "explicit",
                      "Ez": ez * f["modulus"], "Gc": gc * f["modulus"]},
         "faces": {"thickness": [t1 * f["z"], t2 * f["z"]],
@@ -4114,8 +4143,9 @@ def run_stress_relaxation(payload, times_s, kappa=None, bend_radius=None,
     f = units.FROM_SI[si.unit_system]
     th = list(si.thicknesses)
     z = ABD.z_coordinates(th)
-    core_k = PC.detect_compliant_core(si.plies)
-    if core_k is not None and core_k not in ve_idx:
+    _core_span = PC.detect_compliant_core(si.plies)
+    core_k = None if _core_span is None else _core_span[0]
+    if core_k is not None and not any(i in ve_idx for i in range(_core_span[0], _core_span[1] + 1)):
         core_k = None                     # 이완하지 않는 코어는 볼 이유가 없다
     span_si = None
     if span is not None:
@@ -4160,12 +4190,17 @@ def run_stress_relaxation(payload, times_s, kappa=None, bend_radius=None,
         # CLT ABD 만 보면 이완 효과가 0에 가깝지만(실측 0.0%), 부분합성으로 보면 합성도가
         # 73%→18% 로 무너져 유효 굽힘강성이 0.37배가 된다. 순응층이 있으면 함께 낸다.
         if core_k is not None and span_si is not None:
-            g_t = plies_t[core_k][2]        # 이완된 코어 전단탄성계수
-            ea1, ei1 = PC.sublaminate_ea_ei(qb, th, 0, core_k)
-            ea2, ei2 = PC.sublaminate_ea_ei(qb, th, core_k + 1, len(th))
-            _eac, eic = PC.sublaminate_ea_ei(qb, th, core_k, core_k + 1)
+            c_lo, c_hi = _core_span
+            # 코어가 여러 ply 로 쪼개져 있으면 직렬 조화평균으로 묶는다 (NC-07)
+            t_core_t = float(sum(th[c_lo:c_hi + 1]))
+            comp = sum(th[i] / plies_t[i][2] if plies_t[i][2] > 0 else math.inf
+                       for i in range(c_lo, c_hi + 1))
+            g_t = t_core_t / comp if comp > 0 and math.isfinite(comp) else 0.0
+            ea1, ei1 = PC.sublaminate_ea_ei(qb, th, 0, c_lo)
+            ea2, ei2 = PC.sublaminate_ea_ei(qb, th, c_hi + 1, len(th))
+            _eac, eic = PC.sublaminate_ea_ei(qb, th, c_lo, c_hi + 1)
             pcr = PC.composite_action(ea1, ei1, ea2, ei2, eic, float(D[0, 0]),
-                                      g_t, th[core_k], span_si)
+                                      g_t, t_core_t, span_si)
             row["partial_composite"] = {
                 "composite_action": pcr.get("composite_action"),
                 "EI_effective": (pcr["EI_effective"] * f["D"]

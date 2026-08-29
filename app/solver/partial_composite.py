@@ -87,12 +87,52 @@ def composite_action(ea1: float, ei1: float, ea2: float, ei2: float,
             "alpha": alpha_v, "alpha_L": alpha_v * span, "d": math.sqrt(d2)}
 
 
-def detect_compliant_core(plies) -> int | None:
-    """가장 무른 중간층을 찾는다. 이웃 대비 횡전단강성이 10배 이상 낮아야 인정한다."""
-    if len(plies) < 3:
+CORE_STIFFNESS_RATIO = 10.0      # 이웃이 이만큼 뻣뻣해야 순응 코어로 인정한다
+
+
+def detect_compliant_core(plies) -> tuple[int, int] | None:
+    """가장 무른 중간층 **구간** (lo, hi) 를 찾는다 (양끝 포함).
+
+    코어를 여러 ply 로 쪼개 모델링하는 것은 흔한 관례라(중앙 절점 배치 등) 인접한
+    동등 순응층은 하나의 덩어리로 묶는다 — 단일 층만 보면 이웃이 같은 코어라
+    "순응층 없음"으로 답해 버렸다(적대 검증 NC-07).
+    """
+    n = len(plies)
+    if n < 3:
         return None
     g_of = [(p.g13 if p.g13 is not None else p.G12) for p in plies]
-    inner = range(1, len(plies) - 1)
+    inner = range(1, n - 1)
     k = min(inner, key=lambda i: (g_of[i], i))
-    neighbours = min(g_of[k - 1], g_of[k + 1])
-    return k if neighbours >= 10.0 * g_of[k] else None
+    if g_of[k] <= 0.0:
+        return None
+    # 구간 경계는 **척도 불변 기하평균**으로 가른다 — 최연층과 확실한 면재(최외곽 ply)
+    # 사이 기하평균보다 무른 인접 내부층은 같은 코어 덩어리다. 고정 배수를 쓰면
+    # 등급형 코어(서로 다른 두 접착층)를 놓친다.
+    face_g = min(g_of[0], g_of[n - 1])
+    if face_g <= 0.0:
+        return None
+    thresh = math.sqrt(g_of[k] * face_g)
+    lo = hi = k
+    while lo - 1 >= 1 and g_of[lo - 1] <= thresh:
+        lo -= 1
+    while hi + 1 <= n - 2 and g_of[hi + 1] <= thresh:
+        hi += 1
+    neighbours = min(g_of[lo - 1], g_of[hi + 1])
+    g_run = max(g_of[lo:hi + 1])
+    return (lo, hi) if neighbours >= CORE_STIFFNESS_RATIO * g_run else None
+
+
+def core_shear_and_thickness(plies, lo: int, hi: int) -> tuple[float, float]:
+    """코어 구간의 등가 횡전단강성과 총 두께. **직렬 조화평균**이다.
+
+    전단 유연성 t/G 가 층별로 더해지므로 G_eq = Σt_i / Σ(t_i/G_i) 다.
+    """
+    t_total = 0.0
+    compliance = 0.0
+    for i in range(lo, hi + 1):
+        g = plies[i].g13 if plies[i].g13 is not None else plies[i].G12
+        t_i = plies[i].thickness
+        t_total += t_i
+        compliance += t_i / g if g > 0 else math.inf
+    g_eq = t_total / compliance if compliance > 0 and math.isfinite(compliance) else 0.0
+    return g_eq, t_total

@@ -324,3 +324,46 @@ def test_fracture_input_validation():
             payload, loads=loads, fracture=fr)["errors"][0]["code"] == "E100"
     assert srv.assess_free_edge_delamination(
         payload, loads=loads, fracture={"G_c": 0.1})["errors"] == []
+
+
+# --- NC-05: 혼합모드 경로에서도 headline 에 개시 변형률·여유를 싣는다 ------------
+
+_ANG30 = {"unit_system": "SI_mm", "laminae": [
+    {"material": {"type": "orthotropic_2d", "E1": 138000.0, "E2": 10300.0,
+                  "G12": 5500.0, "nu12": 0.3}, "angle_deg": a, "thickness": 0.125}
+    for a in (30.0, -30.0, -30.0, 30.0, 30.0, -30.0, -30.0, 30.0)]}
+
+
+def test_mixed_mode_governing_carries_onset_and_margin():
+    """G_Ic/G_IIc 를 주면 governing_interface 에도 개시 변형률·여유가 실린다."""
+    d = srv.assess_free_edge_delamination(
+        _ANG30, loads={"N": [200.0, 0.0, 0.0]},
+        fracture={"G_Ic": 0.2, "G_IIc": 0.8})["data"]
+    g = d["governing_interface"]
+    assert g["onset_strain"] is not None and g["margin"] is not None
+    row = next(r for r in d["interfaces"] if r["interface"] == g["interface"])
+    assert g["onset_strain"] == pytest.approx(row["onset_strain"], rel=1e-12)
+    assert g["margin"] == pytest.approx(row["margin"], rel=1e-12)
+
+
+def test_free_edge_warns_when_margin_below_one():
+    """여유가 1 미만이면 반드시 경고한다 — 조용히 지나가면 안 된다."""
+    r = srv.assess_free_edge_delamination(
+        _ANG30, loads={"N": [900.0, 0.0, 0.0]}, fracture={"G_Ic": 0.2, "G_IIc": 0.8})
+    assert r["data"]["governing_interface"]["margin"] < 1.0
+    assert any("박리 여유" in w["message"] for w in r["warnings"])
+
+
+def test_free_edge_stays_quiet_when_safe():
+    """여유가 충분하면 그 경고는 나오지 않는다(경고 피로 방지)."""
+    r = srv.assess_free_edge_delamination(
+        _ANG30, loads={"N": [200.0, 0.0, 0.0]}, fracture={"G_Ic": 0.2, "G_IIc": 0.8})
+    assert r["data"]["governing_interface"]["margin"] > 1.0
+    assert not any("박리 여유" in w["message"] for w in r["warnings"])
+
+
+def test_no_toughness_still_omits_onset():
+    """인성이 없으면 개시 변형률을 지어내지 않는다."""
+    g = srv.assess_free_edge_delamination(
+        _ANG30, loads={"N": [200.0, 0.0, 0.0]})["data"]["governing_interface"]
+    assert "onset_strain" not in g and "margin" not in g

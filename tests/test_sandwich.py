@@ -149,3 +149,46 @@ def test_deterministic():
     a = srv.assess_sandwich_local_failure(sw(), core=CORE, applied={"N": [-300.0, 0.0, 0.0]})
     b = srv.assess_sandwich_local_failure(sw(), core=CORE, applied={"N": [-300.0, 0.0, 0.0]})
     assert a["data"] == b["data"]
+
+
+# --- NC-03 / GATE-04: 지배 모드 판정 ------------------------------------------
+
+_FACE_S = {"type": "orthotropic_2d", "E1": 70000.0, "E2": 70000.0, "G12": 26000.0, "nu12": 0.34,
+           "strength": {"Xt": 600.0, "Xc": 570.0, "Yt": 600.0, "Yc": 570.0, "S": 90.0}}
+_CORE_S = {"type": "orthotropic_2d", "E1": 200.0, "E2": 200.0, "G12": 77.0, "nu12": 0.3,
+           "G13": 60.0, "G23": 40.0,
+           "strength": {"Xt": 2.0, "Xc": 1.5, "Yt": 2.0, "Yc": 1.5, "S": 1.2}}
+_SW_S = {"unit_system": "SI_mm", "laminae": [
+    {"material": _FACE_S, "angle_deg": 0.0, "thickness": 0.5},
+    {"material": _CORE_S, "angle_deg": 0.0, "thickness": 10.0},
+    {"material": _FACE_S, "angle_deg": 0.0, "thickness": 0.5}]}
+_CORE_IN = {"Ez": 300.0, "Gc": 77.0, "shear_strength": 1.2}
+
+
+def test_core_shear_governs_without_face_compression():
+    """면재 압축이 없어도 코어 전단은 독립적으로 지배한다 (NC-03)."""
+    d = srv.assess_sandwich_local_failure(_SW_S, core=_CORE_IN, shear={"Vx": 8.0})["data"]
+    assert d["governing"]["mode"] == "core_shear"
+    assert d["governing"]["margin"] == pytest.approx(
+        d["modes"]["core_shear"]["margin"], rel=1e-12)
+
+
+def test_face_material_margin_excludes_core_strength():
+    """면재 재료 여유에 코어 Xc 가 섞이면 안 된다 (GATE-04)."""
+    d = srv.assess_sandwich_local_failure(
+        _SW_S, core=_CORE_IN, applied={"N": [-200.0, 0.0, 0.0]})["data"]
+    s_app = d["face_stress"]["max_compressive"]
+    # 면재 Xc=570 기준이어야 한다. 코어 Xc=1.5 가 섞이면 0.008 로 "이미 파손"이 된다.
+    assert d["governing"]["margins"]["face_material"] == pytest.approx(570.0 / s_app, rel=1e-9)
+    assert d["governing"]["margin"] > 1.0
+
+
+def test_core_shear_competes_with_face_modes():
+    """면재 압축과 코어 전단이 같이 있으면 더 작은 쪽이 지배한다."""
+    d = srv.assess_sandwich_local_failure(
+        _SW_S, core=_CORE_IN, applied={"N": [-200.0, 0.0, 0.0]}, shear={"Vx": 8.0})["data"]
+    m = d["governing"]["margins"]
+    assert set(m) == {"face_wrinkling", "face_material", "core_shear"}
+    assert d["governing"]["margin"] == pytest.approx(min(m.values()), rel=1e-12)
+    assert d["governing"]["mode"] == "core_shear"
+    assert d["governing"]["basis"] == sorted(m)

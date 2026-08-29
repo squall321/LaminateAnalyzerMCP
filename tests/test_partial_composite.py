@@ -186,3 +186,60 @@ def test_gate_silent_when_span_is_long_or_no_compliant_layer():
                           for a in (0.0, 90.0, 90.0, 0.0)]}
     env = srv.compute_buckling(normal, panel={"Lx": 10.0, "Ly": 10.0})
     assert not any("순응층" in w["message"] for w in env["warnings"])
+
+
+# --- NC-07: 쪼갠 코어를 하나로 묶는다 ------------------------------------------
+
+def _split_core(n_split):
+    """코어를 n 등분해도 물리적으로 같은 적층이다."""
+    return {"unit_system": "SI_mm", "laminae":
+            [{"material": UTG, "angle_deg": 0.0, "thickness": 0.03}]
+            + [{"material": OCA, "angle_deg": 0.0, "thickness": 0.05 / n_split}] * n_split
+            + [{"material": UTG, "angle_deg": 0.0, "thickness": 0.03}]}
+
+
+def test_split_core_is_detected_as_one_run():
+    """인접 동등 순응층을 하나로 묶는다 — 전에는 '순응층 없음' E100 이었다."""
+    for n_split in (2, 3, 5):
+        d = srv.assess_partial_composite_bending(_split_core(n_split), span=10.0)["data"]
+        assert d["core_ply"]["indices"] == list(range(1, n_split + 1))
+        assert d["core_ply"]["merged_plies"] == n_split
+        assert d["core_ply"]["thickness"] == pytest.approx(0.05, rel=1e-12)
+
+
+def test_split_core_gives_identical_answer():
+    """쪼개도 답이 **완전히 같아야** 한다(직렬 조화평균 G, 두께 합)."""
+    one = srv.assess_partial_composite_bending(_split_core(1), span=10.0)["data"]
+    for n_split in (2, 3, 5):
+        d = srv.assess_partial_composite_bending(_split_core(n_split), span=10.0)["data"]
+        assert d["composite_action"] == pytest.approx(one["composite_action"], rel=1e-12)
+        assert d["EI_effective"] == pytest.approx(one["EI_effective"], rel=1e-12)
+        assert d["clt_overprediction"] == pytest.approx(one["clt_overprediction"], rel=1e-12)
+
+
+def test_core_shear_series_harmonic():
+    """서로 다른 두 코어층은 직렬 조화평균으로 묶인다 (t/G 가 더해진다)."""
+    soft = {"type": "isotropic", "E": 0.894, "nu": 0.49}
+    softer = {"type": "isotropic", "E": 0.3, "nu": 0.49}
+    lam = {"unit_system": "SI_mm", "laminae": [
+        {"material": UTG, "angle_deg": 0.0, "thickness": 0.03},
+        {"material": soft, "angle_deg": 0.0, "thickness": 0.025},
+        {"material": softer, "angle_deg": 0.0, "thickness": 0.025},
+        {"material": UTG, "angle_deg": 0.0, "thickness": 0.03}]}
+    d = srv.assess_partial_composite_bending(lam, span=10.0)["data"]
+    g1 = 0.894 / (2 * 1.49)
+    g2 = 0.3 / (2 * 1.49)
+    expected = 0.05 / (0.025 / g1 + 0.025 / g2)
+    assert d["core_ply"]["G_transverse"] == pytest.approx(expected, rel=1e-9)
+
+
+def test_stiff_inner_run_is_still_rejected():
+    """뻣뻣한 중간층 무리는 여전히 순응층이 아니다 (게이트 오작동 방지)."""
+    stiff = {"type": "isotropic", "E": 60000.0, "nu": 0.3}
+    lam = {"unit_system": "SI_mm", "laminae": [
+        {"material": UTG, "angle_deg": 0.0, "thickness": 0.03},
+        {"material": stiff, "angle_deg": 0.0, "thickness": 0.025},
+        {"material": stiff, "angle_deg": 0.0, "thickness": 0.025},
+        {"material": UTG, "angle_deg": 0.0, "thickness": 0.03}]}
+    r = srv.assess_partial_composite_bending(lam, span=10.0)
+    assert r["errors"][0]["code"] == "E100"

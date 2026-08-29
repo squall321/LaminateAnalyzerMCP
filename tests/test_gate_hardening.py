@@ -90,10 +90,13 @@ def test_thermal_gate_y_axis_matches_direct_buckling():
     b = srv.compute_thermal_response(_lam([0] * 8, mat=_NEG_A), delta_T=120.0,
                                      panel={"Lx": 200.0, "Ly": 200.0})["data"]["restrained_buckling"]
     ratio = b["restrained_Nx"] / b["restrained_Ny"]
-    direct = srv.compute_buckling(_lam([90] * 8, mat=_NEG_A),
-                                  panel={"Lx": 200.0, "Ly": 200.0},
-                                  load_ratio=ratio)["data"]["N_cr"]
-    assert b["N_cr"] == pytest.approx(direct, rel=1e-12)
+    dd = srv.compute_buckling(_lam([90] * 8, mat=_NEG_A), panel={"Lx": 200.0, "Ly": 200.0},
+                              load_ratio=ratio)["data"]
+    assert b["N_cr_clt"] == pytest.approx(dd["N_cr"], rel=1e-12)
+    # 보정 후 값도 같은 경로를 탄다
+    fs = dd.get("transverse_shear_fsdt")
+    assert b["N_cr"] == pytest.approx(min(dd["N_cr"], fs["N_cr"]) if fs else dd["N_cr"],
+                                      rel=1e-12)
 
 
 def test_thermal_gate_silent_on_tension():
@@ -219,3 +222,106 @@ def test_moisture_chain_note_states_the_uniform_assumption():
     r = srv.compute_moisture_uptake(_lam([0, 90, 90, 0], mat=_WET), diffusion=_DIFF,
                                     time_s=_time_for_tau(0.05))
     assert "균일하게" in r["data"]["state"]["chain"]
+
+
+# --- PC2-01 계열: 횡전단 보정을 전 모드에서 최소화한다 -------------------------
+
+_SW_F = {"type": "orthotropic_2d", "E1": 70000.0, "E2": 70000.0, "G12": 26000.0, "nu12": 0.34}
+_SW_C = {"type": "orthotropic_2d", "E1": 200.0, "E2": 200.0, "G12": 77.0, "nu12": 0.3,
+         "G13": 60.0, "G23": 40.0}
+_SW_P = {"Lx": 300.0, "Ly": 300.0}
+
+
+def _sandwich(scale=1.0):
+    return {"unit_system": "SI_mm", "laminae": [
+        {"material": _SW_F, "angle_deg": 0.0, "thickness": 0.5 * scale},
+        {"material": _SW_C, "angle_deg": 0.0, "thickness": 10.0 * scale},
+        {"material": _SW_F, "angle_deg": 0.0, "thickness": 0.5 * scale}]}
+
+
+def test_fsdt_minimum_is_below_clt_mode_correction():
+    """CLT 임계모드에서만 보정하면 임계 모드 이동을 놓친다."""
+    d = srv.compute_buckling(_sandwich(), panel=_SW_P, applied_Nx=200.0)["data"]
+    fs = d["transverse_shear_fsdt"]
+    assert fs["N_cr"] <= d["transverse_shear"]["corrected_N_cr"]
+    assert (fs["mode"]["m"], fs["mode"]["n"]) != (d["mode"]["m"], d["mode"]["n"])
+    assert d["margin"]["governing_factor"] == pytest.approx(fs["N_cr"] / 200.0, rel=1e-9)
+
+
+def test_fsdt_saturates_at_the_crimping_limit():
+    """m→∞ 에서 N_fsdt → A55 — 코어 전단 크림핑 폐형해 Gc·d²/tc 와 일치."""
+    fs = srv.compute_buckling(_sandwich(), panel=_SW_P)["data"]["transverse_shear_fsdt"]
+    closed_form = 60.0 * 10.5 ** 2 / 10.0            # G_c·d²/t_c (Allen)
+    assert fs["A55"] == pytest.approx(closed_form, rel=2e-3)
+    assert fs["N_cr"] < fs["A55"]                    # 임계하중은 크림핑 한계 아래다
+
+
+@pytest.mark.parametrize("nx,target", [(200.0, 1.5), (1000.0, 1.5), (2000.0, 1.0)])
+def test_required_scale_hits_target_under_crimping(nx, target):
+    """크림핑이 지배해도 배율이 목표를 정확히 맞춘다 — s=1 모드 고정은 한계를 넘겼다."""
+    d = srv.solve_required_thickness_scale(
+        _sandwich(), panel=_SW_P, applied_Nx=nx, target_margin=target)["data"]
+    b = srv.compute_buckling(_sandwich(d["required_scale"]), panel=_SW_P,
+                             applied_Nx=nx)["data"]
+    assert b["margin"]["governing_factor"] == pytest.approx(target, rel=1e-5)
+
+
+def test_required_scale_never_promises_more_than_crimping():
+    """약속한 N_cr 이 크림핑 물리 상한(A55·s)을 넘으면 안 된다."""
+    d = srv.solve_required_thickness_scale(
+        _sandwich(), panel=_SW_P, applied_Nx=2000.0, target_margin=1.0)["data"]
+    limit = d["shear_flexibility"]["crimping_limit_A55"] * d["required_scale"]
+    # FSDT 최소는 m→∞ 에서 A55·s 로 **위에서** 수렴한다 — 유한 격자라 한 톨 위다.
+    # 전에는 이 상한을 1.36배 넘겨 약속했다.
+    assert d["N_cr_scaled"] <= limit * 1.001
+    assert d["N_cr_scaled"] >= limit * 0.999      # 이 하중대는 크림핑이 지배한다
+
+
+# --- 열 구속 좌굴도 같은 보정을 받는다 (PC2-01/contract) -----------------------
+
+_TF = dict(_SW_F, alpha1=23e-6, alpha2=23e-6)
+_TC = dict(_SW_C, G13=40.0, G23=40.0, alpha1=40e-6, alpha2=40e-6)
+_T_SW = {"unit_system": "SI_mm", "laminae": [
+    {"material": _TF, "angle_deg": 0.0, "thickness": 0.5},
+    {"material": _TC, "angle_deg": 0.0, "thickness": 10.0},
+    {"material": _TF, "angle_deg": 0.0, "thickness": 0.5}]}
+
+
+def test_thermal_restrained_buckling_gets_shear_correction():
+    """열 구속 경로만 원시 CLT 를 쓰던 것 — compute_buckling 과 일치해야 한다."""
+    panel = {"Lx": 400.0, "Ly": 400.0}
+    b = srv.compute_thermal_response(_T_SW, delta_T=100.0,
+                                     panel=panel)["data"]["restrained_buckling"]
+    assert b["shear_flexibility_applied"] is True
+    assert b["N_cr"] < b["N_cr_clt"]
+    ref = srv.compute_buckling(_T_SW, panel=panel, applied_Nx=abs(b["restrained_Nx"]),
+                               load_ratio=b["restrained_Ny"] / b["restrained_Nx"])["data"]
+    assert b["load_factor_to_buckling"] == pytest.approx(
+        ref["margin"]["governing_factor"], rel=1e-9)
+    assert b["load_factor_to_buckling"] < 1.0        # 실제로는 이미 좌굴이다
+
+
+# --- 전단 지배 구속 반력에 침묵하지 않는다 (PC2-02) ----------------------------
+
+_NEG_SHEAR = {"type": "orthotropic_2d", "E1": 181000.0, "E2": 10300.0, "G12": 7170.0,
+              "nu12": 0.28, "alpha1": -4.0e-6, "alpha2": 22.5e-6}
+_UNBAL = {"unit_system": "SI_mm", "laminae": [
+    {"material": _NEG_SHEAR, "angle_deg": a, "thickness": 0.125} for a in (30.0, 60.0, 60.0, 30.0)]}
+
+
+def test_thermal_shear_dominated_principal_compression_warns():
+    """축 반력은 둘 다 인장인데 Nxy 주응력이 압축인 경우 — 전에는 경고 0건이었다."""
+    r = srv.compute_thermal_response(_UNBAL, delta_T=100.0, panel={"Lx": 300.0, "Ly": 300.0})
+    nr = [-v for v in r["data"]["thermal_loads"]["N_thermal"]]
+    assert nr[0] > 0 and nr[1] > 0 and abs(nr[2]) > 0
+    assert "restrained_buckling" not in r["data"]
+    assert any("주응력이 압축" in w["message"] for w in r["warnings"])
+
+
+def test_gate_does_not_claim_y_compression_when_both_are_tension():
+    """순수 전단 압축에 'y방향만 압축'이라 안내하면 실행 불가능한 지시가 된다."""
+    lam = _lam([45, -45, -45, 45])
+    r = srv.recover_ply_stresses(lam, loads={"N": [10.0, 10.0, 60.0]}, panel=PANEL)
+    msgs = " ".join(w["message"] for w in r["warnings"])
+    assert "y방향만 압축" not in msgs
+    assert "둘 다 인장" in msgs and "전단 좌굴을 풀지" in msgs

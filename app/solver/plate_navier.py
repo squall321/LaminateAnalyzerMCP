@@ -43,6 +43,87 @@ def _scan_min(Dm: np.ndarray, a: float, b: float, load_ratio: float, scan: int):
     return best
 
 
+MODE_HARD_CAP = 4096      # 다중해상도 탐색 상한 (세장 판은 m_opt 가 수백까지 간다)
+MODE_DENSE = 64           # 이 이하는 전수 탐색
+MODE_GEOM_RATIO = 1.15    # 그 위는 기하 격자
+MODE_REFINE = 24          # 최선 후보 주변 국소 정밀화 반경
+MODE_N_MAX = 24           # n 방향 상한 (n 은 낮은 차수에서 지배한다)
+
+
+def _mode_grid(hard: int) -> list[int]:
+    """고정 다중해상도 격자 — 저차 전수 + 기하 격자. 개수가 입력에 의존하지 않는다."""
+    cands = set(range(1, min(MODE_DENSE, hard) + 1))
+    v = float(MODE_DENSE)
+    while v < hard:
+        v *= MODE_GEOM_RATIO
+        cands.add(min(int(v), hard))
+    return sorted(cands)
+
+
+def _min_over_modes(fn, hard: int = MODE_HARD_CAP, n_max: int = MODE_N_MAX):
+    """fn(m, n) → 값 또는 None. 다중해상도 격자 + 국소 정밀화로 최소를 찾는다.
+
+    세장 판은 임계 m 이 수백에 이른다(실측 [90]4 4000×40 에서 m=311). 정사각 격자
+    전수 탐색을 상한 160 에서 끊으면 **N_cr 이 1.8배 과대**로 나온다(적대 검증
+    PC2-02/PC2-03). 격자는 고정이라 결정론 계약을 지킨다.
+    """
+    grid = _mode_grid(hard)
+    best = None
+    for n in range(1, n_max + 1):
+        local = None
+        for m in grid:
+            val = fn(m, n)
+            if val is None:
+                continue
+            if local is None or val < local[0]:
+                local = (val, m)
+        if local is None:
+            continue
+        m0 = local[1]
+        for m in range(max(1, m0 - MODE_REFINE), min(hard, m0 + MODE_REFINE) + 1):
+            val = fn(m, n)
+            if val is None:
+                continue
+            if val < local[0]:
+                local = (val, m)
+        if best is None or local[0] < best[0]:
+            best = (local[0], local[1], n)
+    return best
+
+
+def buckling_ncr_fsdt(Dm: np.ndarray, a: float, b: float, load_ratio: float,
+                      a55: float, a44: float, hard: int = MODE_HARD_CAP) -> dict:
+    """횡전단 유연성을 **모드마다** 걸고 다시 최소화한 임계하중.
+
+    N_fsdt(m,n) = N_cr(m,n)/(1 + R_s(m,n)) 의 전 모드 최소다. CLT 최소 모드에서만
+    보정을 걸면 전단 유연한 샌드위치에서 실측 최대 1.53배(열 경로는 111배) 비보수다
+    — FSDT 임계 모드가 고차 m 으로 옮겨가기 때문이다(적대 검증 PC2-01 계열).
+    m→∞ 에서 N_fsdt → A55 로 포화하므로 **코어 전단 크림핑 한계가 자동으로 잡힌다**.
+    """
+    from app.solver.interlaminar import shear_flexibility_ratio
+
+    def fn(m, n):
+        denom = (m / a) ** 2 + load_ratio * (n / b) ** 2
+        if denom <= 0:
+            return None
+        ncr = math.pi ** 2 * _navier_term(Dm, m, n, a, b) / denom
+        rs = shear_flexibility_ratio(Dm, a55, a44, a, b, m, n)
+        if not math.isfinite(rs) or rs < 0:
+            return None
+        return ncr / (1.0 + rs)
+
+    best = _min_over_modes(fn, hard)
+    if best is None:
+        return {"N_cr": None, "mode_m": None, "mode_n": None, "mode_scan": hard,
+                "boundary": False, "reason": "압축 지배 모드가 없습니다"}
+    val, m, n = best
+    denom = (m / a) ** 2 + load_ratio * (n / b) ** 2
+    ncr_clt = math.pi ** 2 * _navier_term(Dm, m, n, a, b) / denom
+    return {"N_cr": val, "N_cr_clt_at_mode": ncr_clt, "mode_m": m, "mode_n": n,
+            "mode_scan": hard, "boundary": m >= hard or n >= MODE_N_MAX,
+            "R_s_at_mode": ncr_clt / val - 1.0 if val > 0 else None}
+
+
 def buckling_ncr(Dm: np.ndarray, a: float, b: float, load_ratio: float = 0.0,
                  mode_scan: int = MODE_SCAN, max_scan: int = MAX_SCAN) -> dict:
     """2축 압축(Nx, Ny=R·Nx — 압축 양수) 최소 임계 N_x,cr과 모드 (m,n).
@@ -51,21 +132,49 @@ def buckling_ncr(Dm: np.ndarray, a: float, b: float, load_ratio: float = 0.0,
     최소가 스캔 경계에 있으면 스캔을 배가해 재탐색(내부 최소 확보). 유효 모드가 전혀 없으면
     N_cr=None (호출부가 입력 오류로 매핑 — 적대 검증 NAV-1).
     """
-    scan = max(1, int(mode_scan))
-    while True:
-        best = _scan_min(Dm, a, b, load_ratio, scan)
-        if best is None:
-            if scan >= max_scan:
-                return {"N_cr": None, "mode_m": None, "mode_n": None,
-                        "mode_scan": scan, "boundary": False,
-                        "reason": "스캔 범위에서 압축 지배 모드가 없습니다 (load_ratio가 과도한 음수)"}
-            scan = min(scan * 2, max_scan)
-            continue
-        at_boundary = best[1] >= scan or best[2] >= scan
-        if not at_boundary or scan >= max_scan:
-            return {"N_cr": best[0], "mode_m": best[1], "mode_n": best[2],
-                    "mode_scan": scan, "boundary": at_boundary}
-        scan = min(scan * 2, max_scan)
+    def fn(m, n):
+        denom = (m / a) ** 2 + load_ratio * (n / b) ** 2
+        if denom <= 0:
+            return None
+        return math.pi ** 2 * _navier_term(Dm, m, n, a, b) / denom
+
+    best = _min_over_modes(fn, MODE_HARD_CAP)
+    if best is None:
+        return {"N_cr": None, "mode_m": None, "mode_n": None,
+                "mode_scan": MODE_HARD_CAP, "boundary": False,
+                "reason": "스캔 범위에서 압축 지배 모드가 없습니다 (load_ratio가 과도한 음수)"}
+    return {"N_cr": best[0], "mode_m": best[1], "mode_n": best[2],
+            "mode_scan": MODE_HARD_CAP,
+            "boundary": best[1] >= MODE_HARD_CAP or best[2] >= MODE_N_MAX}
+
+
+def buckling_ncr_fsdt_scaled(Dm: np.ndarray, a: float, b: float, load_ratio: float,
+                             a55: float, a44: float, scale: float,
+                             hard: int = MODE_HARD_CAP) -> dict:
+    """전 ply 를 배율 s 로 키운 적층의 FSDT 전모드 최소 임계하중.
+
+    균일 배율에서 D ∝ s³·A55 ∝ s 는 **정확**하므로(실측 8자리) 적층을 다시 조립하지 않고
+    N(m,n,s) = s³·N_cr(m,n)/(1 + s²·R_s(m,n)) 를 최소화하면 된다. 임계 모드가 배율에 따라
+    옮겨가는 것까지 담는다(적대 검증 PC2-01: s=1 모드 고정은 크림핑 한계를 넘겼다).
+    """
+    from app.solver.interlaminar import shear_flexibility_ratio
+    s2, s3 = scale * scale, scale ** 3
+
+    def fn(m, n):
+        denom = (m / a) ** 2 + load_ratio * (n / b) ** 2
+        if denom <= 0:
+            return None
+        ncr = math.pi ** 2 * _navier_term(Dm, m, n, a, b) / denom
+        rs = shear_flexibility_ratio(Dm, a55, a44, a, b, m, n)
+        if not math.isfinite(rs) or rs < 0:
+            return None
+        return s3 * ncr / (1.0 + s2 * rs)
+
+    best = _min_over_modes(fn, hard)
+    if best is None:
+        return {"N_cr": None, "mode_m": None, "mode_n": None}
+    return {"N_cr": best[0], "mode_m": best[1], "mode_n": best[2],
+            "boundary": best[1] >= hard or best[2] >= MODE_N_MAX}
 
 
 def natural_frequencies(Dm: np.ndarray, rho_areal: float, a: float, b: float,

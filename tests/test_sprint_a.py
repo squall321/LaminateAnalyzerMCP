@@ -221,9 +221,14 @@ def test_nav1_negative_load_ratio_no_crash():
     env = srv.compute_buckling(iso, panel={"Lx": 1.0, "Ly": 0.1}, load_ratio=-1.0)
     assert env["status"] in ("ok", "warning") and env["data"]["N_cr"] > 0
     assert env["data"]["mode"]["m"] > 10          # 스캔 확장으로 발견된 고차 모드
-    # 압축 지배 모드가 아예 없으면 E501이 아니라 E100
+    # 극단 음수 비도 해가 **있다** — 횡방향 인장이 1e6배면 임계하중도 그만큼 커진다.
+    # 예전 E100 은 스캔을 160 에서 끊어 생긴 artifact 였다(다중해상도 탐색으로 해소).
     bad = srv.compute_buckling(iso, panel={"Lx": 1.0, "Ly": 1.0}, load_ratio=-1e6)
-    assert bad["errors"][0]["code"] == "E100" and bad["errors"][0]["field"] == "load_ratio"
+    assert bad["errors"] == []
+    uni = srv.compute_buckling(iso, panel={"Lx": 1.0, "Ly": 1.0})["data"]["N_cr"]
+    assert bad["data"]["N_cr"] / uni > 1e5        # 인장이 좌굴을 그만큼 막는다
+    assert bad["data"]["mode"]["m"] > 100
+    assert any("횡전단 유연성" in w["message"] for w in bad["warnings"])
 
 
 def test_nav2_long_plate_recovers_k4():

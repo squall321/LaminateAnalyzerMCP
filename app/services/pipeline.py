@@ -638,7 +638,20 @@ def run_thermal(payload, delta_t=None, panel=None, delta_c=None,
                        "이 그대로 작용한다** — 팽창이면 압축이라 좌굴을 유발한다"),
     }
     n_restr = -N_f                       # 완전 면내 구속 시 실제로 작용하는 하중
-    nrx, nry = float(n_restr[0]), float(n_restr[1])
+    nrx, nry, nrxy = float(n_restr[0]), float(n_restr[1]), float(n_restr[2])
+    # 축 성분이 둘 다 인장이어도 Nxy 가 크면 주응력은 압축이다 — 전에는 이 경우
+    # restrained_buckling 도 경고도 전혀 안 나갔다(적대 검증 PC2-02).
+    if panel is not None and nrx >= 0.0 and nry >= 0.0:
+        scale_r = max(abs(nrx), abs(nry), abs(nrxy))
+        if scale_r > 0.0:
+            n_min_r = 0.5 * (nrx + nry) - math.hypot(0.5 * (nrx - nry), nrxy)
+            if n_min_r < -1e-9 * scale_r:
+                warnings.append(item("W130", field="thermal_loads",
+                                     detail=f"면내를 구속하면 축 반력은 둘 다 인장이지만 **전단 "
+                                            f"반력 Nxy 가 만든 주응력이 압축이다**"
+                                            f"(최소 주력 {n_min_r * f['A']:.4g}). 이 서버는 전단 "
+                                            f"좌굴을 풀지 못해 판정에서 빠져 있다 — 비평형 적층의 "
+                                            f"열 좌굴은 외부 해석으로 확인할 것"))
     # **y축만 압축인 경우도 푼다.** 전에는 x축 압축만 검사해 [90] 계열 적층·이방 CTE 에서
     # 완전히 침묵했다(적대 검증 GATE-03). x↔y 를 바꾸면 D11↔D22·a↔b 만 바뀐다.
     swap_xy = nrx >= 0.0 > nry
@@ -654,9 +667,27 @@ def run_thermal(payload, delta_t=None, panel=None, delta_c=None,
         ratio = float(n_o / n_c) if n_c != 0.0 else 0.0
         bres = NAV.buckling_ncr(d_use, la, lb, ratio)
         if bres["N_cr"] is not None:
-            factor = bres["N_cr"] / abs(n_c)
+            # **횡전단 유연성을 건다.** 이 경로만 원시 CLT 를 headline 으로 내서
+            # 샌드위치에서 2.56배(폼 코어는 111배) 비보수였고 경고도 0건이었다
+            # (적대 검증 PC2-01/contract). 전 모드 최소라 크림핑 한계까지 담는다.
+            _compliant_core_gate(si, min(lx_si, ly_si), warnings, "짧은 변")
+            si_swap = si
+            fsdt_t = _fsdt_buckling(si_swap, d_use, la, lb, ratio)
+            n_cr_t = bres["N_cr"]
+            if fsdt_t is not None and fsdt_t["N_cr"] < n_cr_t:
+                n_cr_t = fsdt_t["N_cr"]
+            if bres.get("boundary"):
+                warnings.append(item("W130", field="restrained_buckling.mode",
+                                     detail=f"임계 모드가 스캔 상한({bres['mode_scan']})에 걸렸다 — "
+                                            f"N_cr 이 비보수적으로 과대평가되었을 수 있다"))
+            factor = n_cr_t / abs(n_c)
             blk = {
-                "N_cr": bres["N_cr"] * f["A"],
+                "N_cr": n_cr_t * f["A"],
+                "N_cr_clt": bres["N_cr"] * f["A"],
+                "shear_flexibility_applied": bool(fsdt_t is not None
+                                                  and fsdt_t["N_cr"] < bres["N_cr"]),
+                **({"R_s_at_mode": fsdt_t["R_s_at_mode"],
+                    "crimping_limit_A55": fsdt_t["A55"] * f["A"]} if fsdt_t else {}),
                 "restrained_Nx": nrx * f["A"],
                 "restrained_Ny": nry * f["A"],
                 "compressed_axis": "y" if swap_xy else "x",
@@ -1212,12 +1243,34 @@ def run_buckling(payload, panel, load_ratio: float = 0.0, applied_Nx=None,
            if flex_b else {}),
         "definition": "SS 4변, N_cr(m,n)=π²[D11(m/a)⁴+2(D12+2D66)(m/a)²(n/b)²+D22(n/b)⁴]/[(m/a)²+R(n/b)²] 최소. 압축 양수, Nxy 미지원",
     }
+    # **FSDT 전 모드 최소** — CLT 최소 모드에서만 보정하면 임계 모드 이동을 놓친다
+    # (적대 검증 PC2-01: 최대 1.53배 비보수, 크림핑 한계 초과).
+    fsdt = _fsdt_buckling(si, D_use, a, b, load_ratio) if bpairs == ("SS", "SS") else None
+    if fsdt is not None:
+        data["transverse_shear_fsdt"] = {
+            "N_cr": fsdt["N_cr"] * f["A"],
+            "mode": {"m": fsdt["mode_m"], "n": fsdt["mode_n"]},
+            "R_s_at_mode": fsdt["R_s_at_mode"],
+            "A55": fsdt["A55"] * f["A"], "A44": fsdt["A44"] * f["A"],
+            "definition": "min over (m,n) of N_cr(m,n)/(1+R_s(m,n)). m→∞ 에서 A55 로 포화하므로 "
+                          "코어 전단 크림핑 한계를 자동으로 담는다",
+        }
+        if flex_b and fsdt["N_cr"] < res["N_cr"] * flex_b["buckling_factor"] * 0.98:
+            warnings.append(item("W130", field="transverse_shear_fsdt",
+                                 detail=f"CLT 임계모드(m={res['mode_m']},n={res['mode_n']})에서 보정한 "
+                                        f"값보다 **전 모드 최소가 더 낮다**"
+                                        f"(m={fsdt['mode_m']},n={fsdt['mode_n']}, "
+                                        f"{res['N_cr'] * flex_b['buckling_factor'] / fsdt['N_cr']:.3g}배) — "
+                                        f"횡전단이 유효하면 임계 모드가 고차로 옮겨간다. "
+                                        f"판정에는 transverse_shear_fsdt.N_cr 을 쓸 것"))
     if applied_Nx is not None:
         # factor 는 CLT 기준이라 두꺼운 판·샌드위치에서 비보수다 — 보정값을 **나란히** 낸다.
         # 보정 인자는 transverse_shear 블록 안에만 있어 에이전트가 합치지 않고 headline 만
         # 읽으면 샌드위치에서 1.9배 낙관적인 답을 얻는다(적대 검증 GATE-02 계열).
         fac = data["N_cr"] / applied_Nx
         fac_c = fac * flex_b["buckling_factor"] if flex_b else fac
+        if fsdt is not None:
+            fac_c = min(fac_c, fsdt["N_cr"] * f["A"] / applied_Nx)
         data["margin"] = {"applied_Nx": applied_Nx, "factor": fac,
                           "factor_shear_corrected": fac_c,
                           "governing_factor": min(fac, fac_c),
@@ -1435,6 +1488,31 @@ def run_progressive(payload, loads, discount: float = 0.1, delta_t=None,
 
 
 # ── V2-3차: 층간 응력 / 감쇠 / 횡전단 유연성 (계획서 §17.6) ─────────────────
+
+
+def _fsdt_buckling(si, D_use, a, b, load_ratio):
+    """횡전단 유연성을 **모드마다** 걸고 다시 최소화한 임계하중 (SI).
+
+    CLT 최소 모드에서만 1/(1+R_s) 를 곱하면 전단 유연한 판에서 임계 모드가 옮겨간 것을
+    놓쳐 비보수다(적대 검증: 좌굴 1.53배·열 경로 111배). m→∞ 에서 A55 로 포화하므로
+    코어 전단 크림핑 한계가 자동으로 잡힌다. A55/A44 를 못 구하면 None.
+    """
+    from app.solver import interlaminar as IL
+    from app.solver import plate_navier as NAV
+    A, B, D, z, _h = _abd_of_plies(si.plies)
+    a55, a44 = IL.transverse_shear_stiffness(
+        si.plies, [(p_.g13, p_.g23) for p_ in si.plies],
+        qbars=[MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
+               for p_ in si.plies],
+        z=z, a_kk=(A[0, 0], A[1, 1]), b_kk=(B[0, 0], B[1, 1]), d_kk=(D[0, 0], D[1, 1]))
+    if a55 <= 0 and a44 <= 0:
+        return None
+    res = NAV.buckling_ncr_fsdt(D_use, a, b, float(load_ratio), a55, a44)
+    if res.get("N_cr") is None:
+        return None
+    res["A55"] = a55
+    res["A44"] = a44
+    return res
 
 
 def _shear_flexibility(si, D_use, a, b, m, n, warnings, unit_system) -> dict | None:
@@ -2397,9 +2475,18 @@ def _stability_gate(si, n_si, panel, warnings, r_strength=None, m_si=None):
                                     "compute_buckling 은 같은 panel 에 E100 을 낸다"))
         return None
     if nx >= 0.0:
-        warnings.append(item("W130", field="loads.N",
-                             detail="y방향만 압축이다 — 이 게이트는 Nx 압축 기준이라 좌굴 순위를 "
-                                    "내지 않았다. 축을 바꿔 compute_buckling 을 직접 호출할 것"))
+        if ny >= 0.0:
+            # 두 축 모두 인장인데 주응력만 압축 = **순수 전단 지배**다. "y방향만 압축"이라고
+            # 안내하면 실행 불가능한 지시가 된다(적대 검증 PC2-03).
+            warnings.append(item("W130", field="loads.N",
+                                 detail=f"Nx·Ny 가 둘 다 인장인데 Nxy 가 만든 주응력이 압축이다"
+                                        f"(최소 주력 {n_min:.4g}). **이 서버는 전단 좌굴을 풀지 "
+                                        f"못하므로 좌굴 판정 자체가 불가능하다** — 축을 바꿔도 "
+                                        f"소용없다. 전단 좌굴은 외부 해석으로 확인할 것"))
+        else:
+            warnings.append(item("W130", field="loads.N",
+                                 detail="y방향만 압축이다 — 이 게이트는 Nx 압축 기준이라 좌굴 순위를 "
+                                        "내지 않았다. 축을 바꿔 compute_buckling 을 직접 호출할 것"))
         return None
     d_use, _appl, _h, _k = _bending_stiffness_for_navier(si, warnings)
     ratio = ny / nx if nx != 0.0 else 0.0
@@ -2413,6 +2500,15 @@ def _stability_gate(si, n_si, panel, warnings, r_strength=None, m_si=None):
                               warnings, si.unit_system)
     if flex and flex.get("buckling_factor") is not None:
         n_cr_si = n_cr_si * flex["buckling_factor"]
+    # **전 모드 최소가 더 낮을 수 있다** — CLT 임계모드에서만 보정하면 임계 모드 이동을
+    # 놓친다(적대 검증 PC2-01). 크림핑 포화도 함께 담긴다.
+    fsdt_g = _fsdt_buckling(si, d_use, lx, ly, ratio)
+    if fsdt_g is not None and fsdt_g["N_cr"] < n_cr_si:
+        n_cr_si = fsdt_g["N_cr"]
+    if res.get("boundary"):
+        warnings.append(item("W130", field="governing_mode.buckling",
+                             detail=f"임계 모드가 스캔 상한({res['mode_scan']})에 걸렸다 — "
+                                    f"N_cr 이 비보수적으로 과대평가되었을 수 있다"))
     r_buckling = n_cr_si / abs(nx)
     modes = {"buckling": r_buckling}
     if r_strength is not None:
@@ -2425,7 +2521,10 @@ def _stability_gate(si, n_si, panel, warnings, r_strength=None, m_si=None):
         "buckling": {"N_cr": n_cr_si * units.FROM_SI[si.unit_system]["A"],
                      "N_cr_uncorrected": res["N_cr"] * units.FROM_SI[si.unit_system]["A"],
                      "shear_flexibility_applied": bool(flex and flex.get("buckling_factor")),
-                     "mode": {"m": res["mode_m"], "n": res["mode_n"]},
+                     "fsdt_all_modes_applied": bool(fsdt_g is not None),
+                     "mode": {"m": res["mode_m"], "n": res["mode_n"],
+                              "scan_limit": res["mode_scan"],
+                              "at_scan_boundary": bool(res.get("boundary"))},
                      "load_ratio_Ny_over_Nx": ratio,
                      "boundary": "simply_supported"},
         "definition": ("같은 배수 척도로 정렬한다 — strength = Tsai-Wu R, "
@@ -3442,24 +3541,24 @@ SCALE_BRACKET_STEPS = 200        # 고정 반복 — 결정론 계약(적응 종
 SCALE_BISECT_STEPS = 200
 
 
-def _solve_scale_with_shear(ncr1, rs1, demand):
-    """N_cr(s)/(1+R_s(s)) = demand 의 유일한 양근 (적대 검증 NC-01).
+def _solve_scale_fsdt(capacity, demand):
+    """capacity(s) = demand 의 유일한 양근 (고정 반복 이분법).
 
-    균일 배율 s 에서 D ∝ s³·A55 ∝ s 이므로 **R_s ∝ s²** 다 — 두껍게 할수록 횡전단
-    유연성이 오히려 커져 s³ 법칙이 깨진다. 3차식 N_cr1·s³ − demand·R_s1·s² − demand = 0
-    을 고정 횟수 이분법으로 푼다(f(0)<0, 유일 양근).
+    capacity(s) 는 배율 s 에서의 **FSDT 전모드 최소** 임계하중이라 단조 증가하고,
+    m→∞ 에서 A55·s 로 포화하는 크림핑 한계까지 담는다. 전에는 임계 모드를 s=1 에
+    고정한 3차식을 풀어 크림핑 한계를 넘는 N_cr 을 약속했다(적대 검증 PC2-01).
     """
-    def f(s):
-        return ncr1 * s * s * s - demand * (1.0 + rs1 * s * s)
     hi = 1.0
     for _ in range(SCALE_BRACKET_STEPS):
-        if f(hi) > 0.0:
+        c = capacity(hi)
+        if c is not None and c > demand:
             break
         hi *= 2.0
     lo = 0.0
     for _ in range(SCALE_BISECT_STEPS):
         mid = 0.5 * (lo + hi)
-        if f(mid) > 0.0:
+        c = capacity(mid)
+        if c is not None and c > demand:
             hi = mid
         else:
             lo = mid
@@ -3515,20 +3614,31 @@ def run_required_scale(payload, panel, applied_Nx, target_margin: float = 1.0,
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
     n_si = float(applied_Nx) * units.TO_SI[si.unit_system]["load_n"]
-    # 횡전단 유연성을 s=1 에서 구한다. R_s ∝ s² 이므로 이것으로 전 배율이 결정된다.
     _compliant_core_gate(si, min(a, b), warnings, "짧은 변")        # §19.12 (NC-01)
     flex = _shear_flexibility(si, D_use, a, b, res["mode_m"], res["mode_n"],
                               warnings, si.unit_system)
+    fsdt1 = _fsdt_buckling(si, D_use, a, b, load_ratio) if bp == ("SS", "SS") else None
     rs1 = float(flex["R_s"]) if flex and flex.get("R_s") is not None else 0.0
-    ncr1_eff = res["N_cr"] / (1.0 + rs1)
-    current = ncr1_eff / n_si
     demand = float(target_margin) * n_si
-    if rs1 > 0.0:
-        scale = _solve_scale_with_shear(res["N_cr"], rs1, demand)
-        ncr_scaled = res["N_cr"] * scale ** 3 / (1.0 + rs1 * scale * scale)
+    if fsdt1 is not None:
+        # D ∝ s³·A55 ∝ s 는 정확하므로 적층을 다시 조립하지 않고 전 모드 최소를 배율에
+        # 따라 재최소화한다 — 임계 모드 이동과 크림핑 포화가 모두 담긴다.
+        def _cap(s):
+            if s <= 0.0:
+                return 0.0
+            return NAV.buckling_ncr_fsdt_scaled(D_use, a, b, float(load_ratio),
+                                                fsdt1["A55"], fsdt1["A44"], s)["N_cr"]
+        ncr1_eff = fsdt1["N_cr"]
+        scale = _solve_scale_fsdt(_cap, demand)
+        ncr_scaled = _cap(scale)
+        scaled_mode = NAV.buckling_ncr_fsdt_scaled(D_use, a, b, float(load_ratio),
+                                                   fsdt1["A55"], fsdt1["A44"], scale)
     else:
-        scale = (float(target_margin) / current) ** (1.0 / 3.0)
-        ncr_scaled = res["N_cr"] * scale ** 3
+        ncr1_eff = res["N_cr"] / (1.0 + rs1)
+        scale = (float(target_margin) * n_si * (1.0 + rs1) / res["N_cr"]) ** (1.0 / 3.0)
+        ncr_scaled = res["N_cr"] * scale ** 3 / (1.0 + rs1)
+        scaled_mode = None
+    current = ncr1_eff / n_si
     scale_clt = (float(target_margin) * n_si / res["N_cr"]) ** (1.0 / 3.0)
     f = units.FROM_SI[si.unit_system]
     data = {
@@ -3537,7 +3647,12 @@ def run_required_scale(payload, panel, applied_Nx, target_margin: float = 1.0,
         "required_scale": scale,
         "required_scale_clt_only": scale_clt,
         "shear_flexibility": {"R_s_current": rs1, "R_s_scaled": rs1 * scale * scale,
-                              "applied": rs1 > 0.0},
+                              "applied": rs1 > 0.0,
+                              "fsdt_all_modes": fsdt1 is not None,
+                              "crimping_limit_A55": (fsdt1["A55"] * f["A"]
+                                                     if fsdt1 else None)},
+        **({"scaled_mode": {"m": scaled_mode["mode_m"], "n": scaled_mode["mode_n"]}}
+           if scaled_mode else {}),
         "required_total_thickness": h * scale * f["z"],
         "current_total_thickness": h * f["z"],
         "scaled_ply_thicknesses": [p_.thickness * scale * f["z"] for p_ in si.plies][:config.SUMMARY_TOP_N],
@@ -3546,9 +3661,12 @@ def run_required_scale(payload, panel, applied_Nx, target_margin: float = 1.0,
         "N_cr_scaled": ncr_scaled * f["A"],
         "boundary": boundary,
         "mode": {"m": res["mode_m"], "n": res["mode_n"]},
-        "definition": ("균일 배율 s 에서 D ∝ s³ 이라 CLT 는 N_cr ∝ s³ 이지만 횡전단 유연성은 "
-                       "R_s ∝ s² 로 함께 커진다. N_cr(s)/(1+R_s1·s²) = target·N 의 3차식을 "
-                       "고정 400회(브래킷 200 + 이분 200) 로 푼다. R_s=0 이면 s³ 폐형해와 일치"),
+        "definition": ("균일 배율 s 에서 D ∝ s³·A55 ∝ s 는 정확하다. 그래서 매 배율마다 "
+                       "N(m,n,s) = s³·N_cr(m,n)/(1+s²·R_s(m,n)) 를 **전 모드 최소화**해 "
+                       "capacity(s) 를 만들고, capacity(s) = target·N 을 고정 400회"
+                       "(브래킷 200 + 이분 200) 이분법으로 푼다. 임계 모드가 배율에 따라 "
+                       "옮겨가는 것과 m→∞ 에서 A55·s 로 포화하는 코어 전단 크림핑 한계가 "
+                       "모두 담긴다. R_s=0 이면 s³ 폐형해와 일치"),
     }
     warn = list(warnings)
     if rs1 > 0.0 and scale > scale_clt * 1.01:

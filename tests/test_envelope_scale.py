@@ -123,7 +123,7 @@ def test_envelope_planes_and_errors():
 # ── §19.17 필요 두께 배율 ───────────────────────────────────────────────────
 
 def test_required_scale_is_exact_closed_form():
-    """s = (target/current)^(1/3) 이 정확하다 — 배율 적용 후 실제 여유로 검산."""
+    """배율 적용 후 실제 여유가 목표와 일치한다 (횡전단 보정 포함, 적대 검증 NC-01)."""
     for target in (0.5, 1.0, 2.0, 4.0):
         r = srv.solve_required_thickness_scale(lam(), panel=PANEL, applied_Nx=1.0,
                                                target_margin=target)["data"]
@@ -131,20 +131,23 @@ def test_required_scale_is_exact_closed_form():
         scaled = {"unit_system": "SI_mm",
                   "laminae": [{"material": T300, "angle_deg": a, "thickness": 0.125 * s}
                               for a in (0.0, 90.0, 90.0, 0.0)]}
-        actual = srv.compute_buckling(scaled, panel=PANEL,
-                                      applied_Nx=1.0)["data"]["margin"]["factor"]
+        actual = srv.compute_buckling(
+            scaled, panel=PANEL, applied_Nx=1.0)["data"]["margin"]["governing_factor"]
         assert actual == pytest.approx(target, rel=1e-9)
 
 
 def test_required_scale_cube_law():
-    """N_cr ∝ s³ — 배율이 2배면 여유가 8배."""
+    """CLT 기준 N_cr ∝ s³ — 배율이 2배면 여유가 8배 (횡전단 무시 시의 폐형해)."""
     r = srv.solve_required_thickness_scale(lam(), panel=PANEL, applied_Nx=1.0,
                                            target_margin=8.0)["data"]
     base = srv.solve_required_thickness_scale(lam(), panel=PANEL, applied_Nx=1.0,
                                               target_margin=1.0)["data"]
-    assert r["required_scale"] / base["required_scale"] == pytest.approx(2.0, rel=1e-12)
-    assert r["N_cr_scaled"] / r["N_cr_current"] == pytest.approx(r["required_scale"] ** 3,
-                                                                 rel=1e-12)
+    assert (r["required_scale_clt_only"] / base["required_scale_clt_only"]
+            == pytest.approx(2.0, rel=1e-12))
+    # 실제 배율은 R_s ∝ s² 때문에 CLT 폐형해보다 **크다**(얇은 판이라 차이는 작다)
+    assert r["required_scale"] >= r["required_scale_clt_only"]
+    assert r["N_cr_scaled"] / r["N_cr_current_clt"] == pytest.approx(
+        r["required_scale"] ** 3 / (1.0 + r["shear_flexibility"]["R_s_scaled"]), rel=1e-12)
 
 
 def test_required_scale_respects_boundary():
@@ -169,3 +172,73 @@ def test_required_scale_warns_and_errors():
         assert srv.solve_required_thickness_scale(lam(), **base)["errors"][0]["code"] == "E100"
     assert srv.solve_required_thickness_scale(lam(), panel={"Lx": 1.0},
                                               applied_Nx=1.0)["errors"][0]["code"] == "E100"
+
+
+# --- NC-01: 두께 배율은 횡전단 유연성을 함께 풀어야 한다 ---------------------
+
+_FACE = {"type": "orthotropic_2d", "E1": 70000.0, "E2": 70000.0, "G12": 26000.0, "nu12": 0.34}
+_CORE = {"type": "orthotropic_2d", "E1": 200.0, "E2": 200.0, "G12": 77.0, "nu12": 0.3,
+         "G13": 60.0, "G23": 40.0}
+
+
+def _sandwich(scale=1.0):
+    return {"unit_system": "SI_mm", "laminae": [
+        {"material": _FACE, "angle_deg": 0.0, "thickness": 0.5 * scale},
+        {"material": _CORE, "angle_deg": 0.0, "thickness": 10.0 * scale},
+        {"material": _FACE, "angle_deg": 0.0, "thickness": 0.5 * scale}]}
+
+
+_PANEL = {"Lx": 300.0, "Ly": 300.0}
+
+
+def test_shear_flexibility_scales_as_s_squared():
+    """R_s ∝ s² — 3차식 풀이가 서 있는 가정이다(실측 8자리 일치)."""
+    base = None
+    for s in (1.0, 2.0, 4.0, 8.0):
+        d = srv.compute_buckling(_sandwich(s), panel=_PANEL, load_ratio=0.0)["data"]
+        rs_over_s2 = d["transverse_shear"]["R_s"] / (s * s)
+        if base is None:
+            base = rs_over_s2
+        assert rs_over_s2 == pytest.approx(base, rel=1e-9)
+
+
+def test_required_scale_hits_target_with_shear_flexibility():
+    """배율을 적용한 적층을 compute_buckling 으로 되풀어도 목표 여유가 나온다."""
+    d = srv.solve_required_thickness_scale(
+        _sandwich(), panel=_PANEL, applied_Nx=200.0, target_margin=1.5)["data"]
+    s = d["required_scale"]
+    b = srv.compute_buckling(_sandwich(s), panel=_PANEL, load_ratio=0.0)["data"]
+    achieved = b["N_cr"] * b["transverse_shear"]["buckling_factor"] / 200.0
+    assert achieved == pytest.approx(1.5, rel=1e-6)
+
+
+def test_clt_only_scale_would_miss_the_target():
+    """s³ 폐형해(수정 전)는 같은 샌드위치에서 목표에 크게 못 미친다 — NC-01 회귀."""
+    d = srv.solve_required_thickness_scale(
+        _sandwich(), panel=_PANEL, applied_Nx=200.0, target_margin=1.5)["data"]
+    s_clt = d["required_scale_clt_only"]
+    assert s_clt < d["required_scale"]
+    b = srv.compute_buckling(_sandwich(s_clt), panel=_PANEL, load_ratio=0.0)["data"]
+    achieved = b["N_cr"] * b["transverse_shear"]["buckling_factor"] / 200.0
+    assert achieved < 1.2                       # 목표 1.5 에 30% 가까이 미달
+    assert any("횡전단 유연성" in w["message"] and "필요 배율" in w["message"]
+               for w in srv.solve_required_thickness_scale(
+                   _sandwich(), panel=_PANEL, applied_Nx=200.0, target_margin=1.5)["warnings"])
+
+
+def test_thin_clt_laminate_keeps_the_closed_form():
+    """R_s 가 무시할 수준이면 s³ 폐형해와 일치한다(과잉 보정 없음)."""
+    thin = {"unit_system": "SI_mm", "laminae": [
+        {"material": _FACE, "angle_deg": a, "thickness": 0.125} for a in (0.0, 90.0, 90.0, 0.0)]}
+    d = srv.solve_required_thickness_scale(
+        thin, panel={"Lx": 400.0, "Ly": 400.0}, applied_Nx=0.5, target_margin=2.0)["data"]
+    assert d["required_scale"] == pytest.approx(d["required_scale_clt_only"], rel=0.05)
+
+
+def test_sandwich_required_scale_is_deterministic():
+    a = srv.solve_required_thickness_scale(
+        _sandwich(), panel=_PANEL, applied_Nx=200.0, target_margin=1.5)
+    b = srv.solve_required_thickness_scale(
+        _sandwich(), panel=_PANEL, applied_Nx=200.0, target_margin=1.5)
+    assert a["metadata"]["payload_hash"] == b["metadata"]["payload_hash"]
+    assert a["data"]["required_scale"] == b["data"]["required_scale"]

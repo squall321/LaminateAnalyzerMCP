@@ -1195,8 +1195,22 @@ def run_buckling(payload, panel, load_ratio: float = 0.0, applied_Nx=None,
         "definition": "SS 4변, N_cr(m,n)=π²[D11(m/a)⁴+2(D12+2D66)(m/a)²(n/b)²+D22(n/b)⁴]/[(m/a)²+R(n/b)²] 최소. 압축 양수, Nxy 미지원",
     }
     if applied_Nx is not None:
-        data["margin"] = {"applied_Nx": applied_Nx, "factor": data["N_cr"] / applied_Nx,
-                          "meaning": "factor>1 이면 좌굴 전 (임계/작용)"}
+        # factor 는 CLT 기준이라 두꺼운 판·샌드위치에서 비보수다 — 보정값을 **나란히** 낸다.
+        # 보정 인자는 transverse_shear 블록 안에만 있어 에이전트가 합치지 않고 headline 만
+        # 읽으면 샌드위치에서 1.9배 낙관적인 답을 얻는다(적대 검증 GATE-02 계열).
+        fac = data["N_cr"] / applied_Nx
+        fac_c = fac * flex_b["buckling_factor"] if flex_b else fac
+        data["margin"] = {"applied_Nx": applied_Nx, "factor": fac,
+                          "factor_shear_corrected": fac_c,
+                          "governing_factor": min(fac, fac_c),
+                          "meaning": "factor>1 이면 좌굴 전 (임계/작용). factor 는 CLT 기준이고 "
+                                     "횡전단 유연성을 반영한 값이 factor_shear_corrected 다 — "
+                                     "판정에는 governing_factor(둘 중 작은 값)를 쓸 것"}
+        if flex_b and fac_c < fac * 0.98:
+            warnings.append(item("W130", field="margin.factor",
+                                 detail=f"CLT 여유 {fac:.4g} 는 횡전단 유연성을 반영하면 "
+                                        f"{fac_c:.4g} 로 떨어진다({fac/fac_c:.3g}배 비보수) — "
+                                        f"margin.factor 만 읽지 말고 governing_factor 를 쓸 것"))
     hash_payload = {"laminate": payload, "panel": panel, "load_ratio": load_ratio, "applied_Nx": applied_Nx}
     if ENV.contains_nan_inf(data):
         return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warnings,
@@ -3292,13 +3306,43 @@ def run_failure_envelope(payload, plane: str = "Nx-Ny", magnitude=None,
                      include_debug=include_debug, t0=t0)
 
 
+SCALE_BRACKET_STEPS = 200        # 고정 반복 — 결정론 계약(적응 종료 금지)
+SCALE_BISECT_STEPS = 200
+
+
+def _solve_scale_with_shear(ncr1, rs1, demand):
+    """N_cr(s)/(1+R_s(s)) = demand 의 유일한 양근 (적대 검증 NC-01).
+
+    균일 배율 s 에서 D ∝ s³·A55 ∝ s 이므로 **R_s ∝ s²** 다 — 두껍게 할수록 횡전단
+    유연성이 오히려 커져 s³ 법칙이 깨진다. 3차식 N_cr1·s³ − demand·R_s1·s² − demand = 0
+    을 고정 횟수 이분법으로 푼다(f(0)<0, 유일 양근).
+    """
+    def f(s):
+        return ncr1 * s * s * s - demand * (1.0 + rs1 * s * s)
+    hi = 1.0
+    for _ in range(SCALE_BRACKET_STEPS):
+        if f(hi) > 0.0:
+            break
+        hi *= 2.0
+    lo = 0.0
+    for _ in range(SCALE_BISECT_STEPS):
+        mid = 0.5 * (lo + hi)
+        if f(mid) > 0.0:
+            hi = mid
+        else:
+            lo = mid
+    return 0.5 * (lo + hi)
+
+
 def run_required_scale(payload, panel, applied_Nx, target_margin: float = 1.0,
                        load_ratio: float = 0.0, boundary: str = "simply_supported",
                        include_debug: bool = False) -> dict:
     """목표 좌굴 여유를 만족하는 최소 두께 배율 (solve_required_thickness_scale, §19.17).
 
-    전 ply 두께를 s 배 하면 A ∝ s, D ∝ s³ 이므로 **N_cr ∝ s³** 이다(실측 전 자리 일치).
-    따라서 s = (target·N/N_cr(1))^(1/3) 가 폐형해다 — 에이전트 이분법 5~10회를 1회로 바꾼다.
+    전 ply 두께를 s 배 하면 A ∝ s, D ∝ s³ 이므로 **CLT 에서는 N_cr ∝ s³** 이다.
+    다만 횡전단 유연성 R_s 는 D/A55 ∝ s² 로 **함께 커지므로** 두꺼운 판·샌드위치에서
+    s³ 폐형해는 크게 비보수다(적대 검증 NC-01: s=1.427 로 답했으나 참값 4.102).
+    R_s 가 유효하면 3차식을 고정 횟수 이분법으로 푼다.
     """
     t0 = time.perf_counter()
     si, errors, warnings = VAL.validate_and_convert(payload)
@@ -3339,24 +3383,54 @@ def run_required_scale(payload, panel, applied_Nx, target_margin: float = 1.0,
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
     n_si = float(applied_Nx) * units.TO_SI[si.unit_system]["load_n"]
-    current = res["N_cr"] / n_si
-    scale = (float(target_margin) / current) ** (1.0 / 3.0)
+    # 횡전단 유연성을 s=1 에서 구한다. R_s ∝ s² 이므로 이것으로 전 배율이 결정된다.
+    _compliant_core_gate(si, min(a, b), warnings, "짧은 변")        # §19.12 (NC-01)
+    flex = _shear_flexibility(si, D_use, a, b, res["mode_m"], res["mode_n"],
+                              warnings, si.unit_system)
+    rs1 = float(flex["R_s"]) if flex and flex.get("R_s") is not None else 0.0
+    ncr1_eff = res["N_cr"] / (1.0 + rs1)
+    current = ncr1_eff / n_si
+    demand = float(target_margin) * n_si
+    if rs1 > 0.0:
+        scale = _solve_scale_with_shear(res["N_cr"], rs1, demand)
+        ncr_scaled = res["N_cr"] * scale ** 3 / (1.0 + rs1 * scale * scale)
+    else:
+        scale = (float(target_margin) / current) ** (1.0 / 3.0)
+        ncr_scaled = res["N_cr"] * scale ** 3
+    scale_clt = (float(target_margin) * n_si / res["N_cr"]) ** (1.0 / 3.0)
     f = units.FROM_SI[si.unit_system]
     data = {
         "current_margin": current,
         "target_margin": float(target_margin),
         "required_scale": scale,
+        "required_scale_clt_only": scale_clt,
+        "shear_flexibility": {"R_s_current": rs1, "R_s_scaled": rs1 * scale * scale,
+                              "applied": rs1 > 0.0},
         "required_total_thickness": h * scale * f["z"],
         "current_total_thickness": h * f["z"],
         "scaled_ply_thicknesses": [p_.thickness * scale * f["z"] for p_ in si.plies][:config.SUMMARY_TOP_N],
-        "N_cr_current": res["N_cr"] * f["A"],
-        "N_cr_scaled": res["N_cr"] * scale ** 3 * f["A"],
+        "N_cr_current": ncr1_eff * f["A"],
+        "N_cr_current_clt": res["N_cr"] * f["A"],
+        "N_cr_scaled": ncr_scaled * f["A"],
         "boundary": boundary,
         "mode": {"m": res["mode_m"], "n": res["mode_n"]},
-        "definition": ("전 ply 를 균일 배율 s 로 키우면 D ∝ s³ 이므로 N_cr ∝ s³ 이다(정확). "
-                       "s = (target/current)^(1/3) 폐형해 — 반복 탐색이 필요 없다"),
+        "definition": ("균일 배율 s 에서 D ∝ s³ 이라 CLT 는 N_cr ∝ s³ 이지만 횡전단 유연성은 "
+                       "R_s ∝ s² 로 함께 커진다. N_cr(s)/(1+R_s1·s²) = target·N 의 3차식을 "
+                       "고정 400회(브래킷 200 + 이분 200) 로 푼다. R_s=0 이면 s³ 폐형해와 일치"),
     }
     warn = list(warnings)
+    if rs1 > 0.0 and scale > scale_clt * 1.01:
+        warn.append(item("W130", field="required_scale",
+                         detail=f"횡전단 유연성(R_s={rs1:.3g})을 반영하면 필요 배율이 "
+                                f"{scale_clt:.4g} → {scale:.4g} 로 커진다 — 두껍게 할수록 R_s 도 "
+                                f"s² 로 커져 s³ 법칙이 깨지기 때문이다. CLT 값만 쓰면 "
+                                f"{(scale/scale_clt)**1:.3g}배 얇게 설계된다"))
+    if bp != ("SS", "SS"):
+        warn.append(item("W130", field="boundary",
+                         detail="단순지지 외 경계는 1항 Rayleigh–Ritz **상계**라 N_cr 을 "
+                                "과대평가한다(등방 정사각 실측 CCCC +6.6%, SSCC +11.6%). "
+                                "필요 배율은 그만큼 **과소** 산출된다 — boundary='SSSS' 로도 "
+                                "풀어 두 값을 감쌀 것"))
     warn.append(item("W130", field="required_scale",
                      detail="**균일 배율만** 유효하다 — 일부 ply 만 두껍게 하거나 적층 순서를 바꾸면 "
                             "이 지수 법칙이 깨진다. 그때는 compute_buckling 으로 직접 확인할 것"))

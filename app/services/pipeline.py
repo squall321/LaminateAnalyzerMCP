@@ -3709,3 +3709,431 @@ def run_patterned_layer(components, include_debug: bool = False) -> dict:
                          "등방 극한(전 상 동일 물성)에서 homogenize_layer 와 정확히 일치한다",
                          "단위계 무관 — 출력 단위는 입력과 동일",
                      ], include_debug=include_debug, t0=t0)
+
+
+def run_lap_joint(payload, adhesive, overlap, load, laminate_2=None,
+                  joint_type: str = "double_lap", include_debug: bool = False) -> dict:
+    """접착 겹치기 이음 — Volkersen (assess_bonded_lap_joint, §19.22)."""
+    from app.solver import lap_joint as LJ
+    from app.solver import partial_composite as PC
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    si2 = si
+    if laminate_2 is not None:
+        si2, e2, w2 = VAL.validate_and_convert(laminate_2)
+        if e2:
+            for it in e2:
+                it["field"] = f"laminate_2.{it.get('field', '')}"
+            return ENV.build(data=None, errors=e2, warnings=warnings, payload=payload,
+                             unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+        warnings.extend(w2)
+
+    err = None
+    if joint_type not in ("double_lap", "single_lap"):
+        err = item("E100", field="joint_type",
+                   detail="joint_type은 'double_lap'(편심 없음, Volkersen 유효) 또는 "
+                          "'single_lap'(편심 있음 — peel 이 지배할 수 있어 비보수) 이어야 합니다")
+    elif not isinstance(adhesive, dict) or set(adhesive) - {"G", "thickness", "shear_strength"}:
+        err = item("E100", field="adhesive",
+                   detail="adhesive는 {\"G\": >0, \"thickness\": >0, \"shear_strength\"?: >0} "
+                          "만 허용합니다")
+    elif not (_num_ok(adhesive.get("G")) and _num_ok(adhesive.get("thickness"))):
+        err = item("E100", field="adhesive", detail="adhesive.G 와 adhesive.thickness 는 양수 필수입니다")
+    elif "shear_strength" in adhesive and not _num_ok(adhesive["shear_strength"]):
+        err = item("E100", field="adhesive.shear_strength", detail="shear_strength는 양수여야 합니다")
+    elif not _num_ok(overlap):
+        err = item("E100", field="overlap", detail="overlap(겹침 길이)은 양수여야 합니다")
+    elif not _num_ok(load):
+        err = item("E100", field="load", detail="load(단위 폭당 인장 하중)는 양수여야 합니다")
+    if err is not None:
+        return ENV.build(data=None, errors=[err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    tosi = units.TO_SI[si.unit_system]
+    ga = float(adhesive["G"]) * tosi["modulus"]
+    ta = float(adhesive["thickness"]) * tosi["length"]
+    tau_allow = (float(adhesive["shear_strength"]) * tosi["modulus"]
+                 if "shear_strength" in adhesive else None)
+    l_si = float(overlap) * tosi["length"]
+    p_si = float(load) * tosi["load_n"]
+
+    def _ea(s):
+        qb = [MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
+              for p_ in s.plies]
+        th = list(s.thicknesses)
+        return PC.sublaminate_ea_ei(qb, th, 0, len(th))[0]
+
+    ea1, ea2 = _ea(si), _ea(si2)
+    omega = LJ.shear_lag_omega(ga, ta, ea1, ea2)
+    ratio = LJ.peak_over_average(omega, l_si)
+    tau_avg = p_si / l_si
+    tau_peak = tau_avg * ratio
+    l_sat = LJ.saturation_overlap(omega)
+
+    f = units.FROM_SI[si.unit_system]
+    fm = f["modulus"]
+    data = {
+        "joint_type": joint_type,
+        "adherends": {"EA_1": ea1 * f["A"], "EA_2": ea2 * f["A"],
+                      "thickness": [si.total_thickness * f["z"], si2.total_thickness * f["z"]]},
+        "shear_lag": {"omega": omega / f["z"], "omega_L_half": omega * l_si / 2.0,
+                      "transfer_length": (1.0 / omega) * f["z"] if omega > 0 else None},
+        "tau_avg": tau_avg * fm,
+        "tau_peak": tau_peak * fm,
+        "peak_over_average": ratio,
+        "profile": [{"x_over_L": r["x_over_L"], "tau": r["tau"] * fm}
+                    for r in LJ.shear_profile(omega, l_si, p_si)],
+        "saturation_overlap": l_sat / tosi["length"],
+        "overlap_efficiency": 1.0 / ratio,
+        "definition": ("Volkersen: ω²=(G_a/t_a)(1/EA₁+1/EA₂), τ(x)=(Pω/2)cosh(ωx)/sinh(ωL/2), "
+                       "τ_peak/τ_avg=(ωL/2)coth(ωL/2). overlap_efficiency = τ_avg/τ_peak — "
+                       "겹침 중 실제로 하중을 나눠 지는 비율"),
+    }
+    if tau_allow is not None:
+        data["margin"] = {"peak": tau_allow / tau_peak if tau_peak > 0 else None,
+                          "average": tau_allow / tau_avg if tau_avg > 0 else None,
+                          "note": "peak 기준으로 판정할 것 — average 는 낙관적이다"}
+
+    warn = list(warnings)
+    if joint_type == "single_lap":
+        warn.append(item("W130", field="joint_type",
+                         detail="**단일 겹치기는 하중선이 어긋나 굽힘이 생기고 그 peel 응력(σ_z)이 "
+                                "보통 전단보다 먼저 파손시킨다.** Volkersen 은 peel 을 모델링하지 "
+                                "않으므로 이 결과는 **비보수**다 — 전단만으로 안전을 보고하지 말 것. "
+                                "이중 겹치기(double_lap)는 편심이 없어 유효하다"))
+    if data["shear_lag"]["omega_L_half"] > LJ.SATURATION_OMEGA_L_HALF:
+        warn.append(item("W130", field="saturation_overlap",
+                         detail=f"ωL/2 = {data['shear_lag']['omega_L_half']:.3g} > "
+                                f"{LJ.SATURATION_OMEGA_L_HALF} — **겹침을 더 늘려도 피크 응력이 거의 "
+                                f"줄지 않는다**(포화 겹침 {data['saturation_overlap']:.3g}). "
+                                f"'길수록 강해진다'는 직관이 여기서 깨진다. 접착층을 두껍게 하거나 "
+                                f"더 무른 접착제·피착재 테이퍼를 검토할 것"))
+    if ratio > 3.0:
+        warn.append(item("W130", field="peak_over_average",
+                         detail=f"피크/평균 = {ratio:.3g} — 겹침의 {100 / ratio:.0f}% 만 실효적으로 "
+                                f"하중을 진다. 평균 전단응력으로 설계하면 크게 비보수다"))
+    if abs(ea1 - ea2) / max(ea1, ea2) > 0.1:
+        warn.append(item("W120", field="adherends",
+                         detail=f"피착재 축강성이 다르다(EA 비 {max(ea1, ea2) / min(ea1, ea2):.3g}) — "
+                                f"Volkersen 은 이를 반영하지만 비대칭 이음은 peel 이 더 커진다"))
+    if tau_allow is None:
+        warn.append(item("W120", field="adhesive.shear_strength",
+                         detail="접착 전단강도가 없어 여유율을 내지 못했다 — materialtwin 의 랩전단 "
+                                "실측을 넣으면 판정한다"))
+
+    hash_payload = {"laminate": payload, "laminate_2": laminate_2, "adhesive": adhesive,
+                    "overlap": overlap, "load": load, "joint_type": joint_type}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
+                         payload=hash_payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     unit_system=si.unit_system,
+                     assumptions_extra=[
+                         "Volkersen — 피착재 축변형만, 굽힘·peel 미모델링. 접착층은 전단만 전달",
+                         "탄성 해다 — 접착제 소성으로 실제 피크는 이보다 낮게 재분배된다(보수적)",
+                         *_source_assumptions(si),
+                     ], include_debug=include_debug, t0=t0)
+
+
+def run_notched_strength(payload, hole_diameter, unnotched_strength=None,
+                         d0=None, a0=None, include_debug: bool = False) -> dict:
+    """원공 노치 강도 — K_T(확정) + Whitney–Nuismer(조건부) (assess_notched_strength, §19.23)."""
+    from app.solver import notched as NT
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    err = None
+    if not _num_ok(hole_diameter):
+        err = item("E100", field="hole_diameter", detail="hole_diameter는 양수여야 합니다")
+    elif unnotched_strength is not None and not _num_ok(unnotched_strength):
+        err = item("E100", field="unnotched_strength", detail="unnotched_strength는 양수여야 합니다")
+    elif any(v is not None and not _num_ok(v) for v in (d0, a0)):
+        err = item("E100", field="d0/a0", detail="d0·a0(특성거리)는 양수여야 합니다")
+    if err is not None:
+        return ENV.build(data=None, errors=[err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    A, B, D, z, h = _abd_of_plies(si.plies)
+    try:
+        alpha, _, delta = RESP.compliance_blocks(A, B, D)
+        eff = RESP.effective_constants(alpha, delta, h)["membrane"]
+    except RESP.SingularSystemError:
+        return ENV.build(data=None, errors=[item("E400", field="laminate")], warnings=warnings,
+                         payload=payload, unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+    kt = NT.kt_infinite(eff["Ex"], eff["Ey"], eff["nu_xy"], eff["Gxy"])
+    tosi = units.TO_SI[si.unit_system]
+    radius = 0.5 * float(hole_diameter) * tosi["length"]
+    f = units.FROM_SI[si.unit_system]
+
+    data = {
+        "K_T": kt,
+        "hole_diameter": float(hole_diameter),
+        "effective_constants": {k: (v * f["modulus"] if k != "nu_xy" else v)
+                                for k, v in eff.items()},
+        "K_T_definition": ("K_T∞ = 1 + √(2(√(Ex/Ey) − νxy) + Ex/Gxy) — **순수 폐형해**다. "
+                           "무한 판·원공 가정이며 등방에서 정확히 3 으로 환원된다"),
+        "confidence": {"K_T": "closed_form",
+                       "notched_strength": "requires_fitted_constants"},
+    }
+    warn = list(warnings)
+    if d0 is not None or a0 is not None:
+        if unnotched_strength is None:
+            warn.append(item("W120", field="unnotched_strength",
+                             detail="d0/a0 를 줬지만 무노치 강도가 없어 σ_OH 를 내지 못했다"))
+        else:
+            s_un = float(unnotched_strength)
+            blk = {}
+            if d0 is not None:
+                r = NT.point_stress_ratio(kt, radius, float(d0) * tosi["length"])
+                blk["point_stress"] = {"d0": float(d0), "ratio": r, "sigma_OH": s_un * r}
+            if a0 is not None:
+                r = NT.average_stress_ratio(kt, radius, float(a0) * tosi["length"])
+                blk["average_stress"] = {"a0": float(a0), "ratio": r, "sigma_OH": s_un * r}
+            blk["unnotched_strength"] = s_un
+            blk["definition"] = ("Whitney–Nuismer. ratio = σ_OH/σ_un. d0/a0→0 이면 1/K_T, "
+                                 "→∞ 이면 1 로 환원된다")
+            data["notched_strength"] = blk
+            warn.append(item("W130", field="notched_strength",
+                             detail="**d0·a0 는 재료·적층별 시험 피팅 상수**이고 답이 여기에 강하게 "
+                                    "민감하다 — 실측 [±45/0/90]s φ6.35 에서 d0 = 0.5~2.0 mm 만 바꿔도 "
+                                    "σ_OH 가 234~368 MPa 로 갈린다. 이 값을 시험 없이 쓰지 말 것. "
+                                    "K_T 는 폐형해라 그런 종속이 없다"))
+    else:
+        warn.append(item("W120", field="d0/a0",
+                         detail="특성거리 d0(점응력)·a0(평균응력)가 없어 노치 강도를 내지 않았다 — "
+                                "**의도적이다**. 이 상수는 시험 피팅이라 임의 기본값을 쓰면 "
+                                "그럴듯한 오답이 된다. K_T 만 확정값으로 준다"))
+    if kt > 4.0:
+        warn.append(item("W130", field="K_T",
+                         detail=f"K_T = {kt:.3g} 로 크다 — 이방성이 강한 적층이다. 무노치 강도로 "
+                                f"설계하면 크게 비보수다(준등방 3.0 대비)"))
+    warn.append(item("W130", field="K_T",
+                     detail="무한 판 가정이다 — 구멍 지름이 판 폭의 1/5 를 넘으면 유한 폭 보정이 "
+                            "필요하고 이 도구는 그걸 하지 않는다"))
+
+    hash_payload = {"laminate": payload, "hole_diameter": hole_diameter,
+                    "unnotched_strength": unnotched_strength, "d0": d0, "a0": a0}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
+                         payload=hash_payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     unit_system=si.unit_system,
+                     assumptions_extra=[
+                         "K_T 는 무한 직교이방 판·원공의 폐형해 — 유한 폭·타원공은 범위 밖",
+                         "노치 강도는 시험 피팅 상수(d0/a0)에 종속 — 확정값(K_T)과 분리 보고한다",
+                         *_source_assumptions(si),
+                     ], include_debug=include_debug, t0=t0)
+
+
+RELAX_TIME_LIMIT = 20      # 시점 개수 상한 (토큰 예산)
+
+
+def run_stress_relaxation(payload, times_s, kappa=None, bend_radius=None,
+                          bend_axis: str = "x", width: str = "free", epsilon0=None,
+                          span=None, include_debug: bool = False) -> dict:
+    """곡률을 고정한 채 점탄성층이 이완할 때 M(t)·ply 응력 (solve_stress_relaxation, §19.24).
+
+    점탄성 이완만 단독으로 보면 값이 작다 — Cu/PSA/PI 비대칭 스택에서 PSA 를 E0→E∞ 로
+    이완시켜도 자유 경계 곡률은 몇 % 만 변한다(얇고 무른 층은 ABD 기여가 작다).
+    **진짜 값어치는 곡률을 고정했을 때다** — 폴더블을 접어 둔 채 시간이 지나면 필요
+    모멘트와 ply 응력이 떨어지는 것이 크리스(crease) 잔류의 실제 질문이고,
+    §19.14 의 변위 제어와 짝지어야만 물을 수 있다.
+
+    준탄성 근사: E(t) = E∞ + (E0 − E∞)·exp(−t/τ) 를 넣고 매 시점 ABD 를 다시 조립한다.
+    """
+    from app.solver import prescribed as PRE
+    t0 = time.perf_counter()
+    si, errors, warnings = VAL.validate_and_convert(payload)
+    if errors:
+        return ENV.build(data=None, errors=errors, warnings=warnings, payload=payload,
+                         unit_system=payload.get("unit_system") if isinstance(payload, dict) else None,
+                         include_debug=include_debug, t0=t0)
+    ve_idx = [k for k, p_ in enumerate(si.plies)
+              if p_.ve_E0 is not None and p_.ve_Einf is not None and p_.ve_tau_s is not None]
+    err = None
+    if not ve_idx:
+        err = item("E100", field="laminae",
+                   detail="점탄성 ply 가 없습니다 — material.viscoelastic {E0, Einf, tau_s} 가 "
+                          "최소 한 ply 에 필요합니다(tau_s 포함)")
+    elif not (isinstance(times_s, list) and 0 < len(times_s) <= RELAX_TIME_LIMIT
+              and all(_num_ok(t, positive=False) and t >= 0 for t in times_s)):
+        err = item("E100", field="times_s",
+                   detail=f"times_s는 0 이상 숫자 1~{RELAX_TIME_LIMIT}개 리스트(초)여야 합니다")
+    if err is not None:
+        return ENV.build(data=None, errors=[err], warnings=warnings, payload=payload,
+                         unit_system=si.unit_system, include_debug=include_debug, t0=t0)
+
+    # 곡률 지정 해석 — §19.14 와 같은 규약
+    if bend_radius is not None:
+        if kappa is not None or not _num_ok(bend_radius):
+            return ENV.build(data=None, errors=[item("E100", field="bend_radius",
+                                                     detail="bend_radius는 양수이며 kappa 와 동시 사용 불가")],
+                             warnings=warnings, payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+        kv = 1.0 / (float(bend_radius) * units.TO_SI[si.unit_system]["length"])
+        other = 0.0 if width == "constrained" else None
+        kap_si = [kv, other, None] if bend_axis == "x" else [other, kv, None]
+    elif kappa is not None:
+        if not (isinstance(kappa, list) and len(kappa) == 3):
+            return ENV.build(data=None, errors=[item("E100", field="kappa",
+                                                     detail="kappa는 길이 3 리스트여야 합니다")],
+                             warnings=warnings, payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+        kap_si = [None if v is None else float(v) * units.TO_SI[si.unit_system]["kappa"]
+                  for v in kappa]
+    else:
+        return ENV.build(data=None, errors=[item("E100", field="kappa/bend_radius",
+                                                 detail="곡률을 지정해야 합니다 — 이완은 변위를 고정한 "
+                                                        "상태에서만 의미가 있습니다")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    if width not in ("free", "constrained") or bend_axis not in ("x", "y"):
+        return ENV.build(data=None, errors=[item("E100", field="width/bend_axis",
+                                                 detail="width는 free|constrained, bend_axis는 x|y")],
+                         warnings=warnings, payload=payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    eps_si = ([None if v is None else float(v) for v in epsilon0]
+              if isinstance(epsilon0, list) and len(epsilon0) == 3 else None)
+    presc = PRE.build_prescription(kap_si, eps_si)
+
+    from app.solver import failure as FAIL
+    from app.solver import partial_composite as PC
+    f = units.FROM_SI[si.unit_system]
+    th = list(si.thicknesses)
+    z = ABD.z_coordinates(th)
+    core_k = PC.detect_compliant_core(si.plies)
+    if core_k is not None and core_k not in ve_idx:
+        core_k = None                     # 이완하지 않는 코어는 볼 이유가 없다
+    span_si = None
+    if span is not None:
+        if not _num_ok(span):
+            return ENV.build(data=None, errors=[item("E100", field="span",
+                                                     detail="span(굽힘 스팬)은 양수여야 합니다")],
+                             warnings=warnings, payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+        span_si = float(span) * units.TO_SI[si.unit_system]["length"]
+    rows = []
+    for t_s in sorted(float(x) for x in times_s):
+        plies_t = []
+        for k, p_ in enumerate(si.plies):
+            if k in ve_idx:
+                decay = math.exp(-t_s / p_.ve_tau_s) if p_.ve_tau_s > 0 else 0.0
+                e_t = p_.ve_Einf + (p_.ve_E0 - p_.ve_Einf) * decay
+                ratio = e_t / p_.E1 if p_.E1 > 0 else 1.0
+                plies_t.append((e_t, p_.E2 * ratio, p_.G12 * ratio, p_.nu12, p_.angle_deg))
+            else:
+                plies_t.append((p_.E1, p_.E2, p_.G12, p_.nu12, p_.angle_deg))
+        qb = [MAT.qbar_matrix(MAT.q_matrix(e1, e2, g, nu), a) for e1, e2, g, nu, a in plies_t]
+        A, B, D = ABD.abd_matrices(qb, z)
+        K = np.block([[A, B], [B, D]])
+        try:
+            x, gen = PRE.partitioned_solve(K, presc, np.zeros(6))
+        except PRE.SingularPartition as exc:
+            return ENV.build(data=None, errors=[item("E400", field="laminate", detail=str(exc))],
+                             warnings=warnings, payload=payload, unit_system=si.unit_system,
+                             include_debug=include_debug, t0=t0)
+        peak = 0.0
+        for k in range(len(th)):
+            for zv in (float(z[k]), float(z[k + 1])):
+                s12 = FAIL.stress_to_material_axes(
+                    FAIL.ply_stresses_at(qb[k], x[:3], x[3:], zv), plies_t[k][4])
+                peak = max(peak, float(np.max(np.abs(s12))))
+        row = {"time_s": t_s,
+               "E_viscoelastic": [plies_t[k][0] * f["modulus"] for k in ve_idx],
+               "M": (gen[3:] * f["load_m"]).tolist(),
+               "N": (gen[:3] * f["A"]).tolist(),
+               "peak_ply_stress": peak * f["modulus"]}
+        # §19.12 경로 — 순응층의 진짜 역할은 굽힘강성 기여가 아니라 **전단 결합**이다.
+        # CLT ABD 만 보면 이완 효과가 0에 가깝지만(실측 0.0%), 부분합성으로 보면 합성도가
+        # 73%→18% 로 무너져 유효 굽힘강성이 0.37배가 된다. 순응층이 있으면 함께 낸다.
+        if core_k is not None and span_si is not None:
+            g_t = plies_t[core_k][2]        # 이완된 코어 전단탄성계수
+            ea1, ei1 = PC.sublaminate_ea_ei(qb, th, 0, core_k)
+            ea2, ei2 = PC.sublaminate_ea_ei(qb, th, core_k + 1, len(th))
+            _eac, eic = PC.sublaminate_ea_ei(qb, th, core_k, core_k + 1)
+            pcr = PC.composite_action(ea1, ei1, ea2, ei2, eic, float(D[0, 0]),
+                                      g_t, th[core_k], span_si)
+            row["partial_composite"] = {
+                "composite_action": pcr.get("composite_action"),
+                "EI_effective": (pcr["EI_effective"] * f["D"]
+                                 if pcr.get("EI_effective") is not None else None),
+                "G_core": g_t * f["modulus"],
+            }
+        rows.append(row)
+
+    m0 = rows[0]["M"][0]
+    pc0 = rows[0].get("partial_composite")
+    pcl = rows[-1].get("partial_composite")
+    for r in rows:
+        r["M_over_initial"] = (r["M"][0] / m0) if m0 != 0 else None
+    last = rows[-1]
+    data = {
+        "viscoelastic_plies": ve_idx,
+        "prescribed_dof": [n for n, v in zip(("eps_x", "eps_y", "gamma_xy", "kappa_x",
+                                              "kappa_y", "kappa_xy"), presc) if v is not None],
+        "times": rows,
+        "relaxation": {
+            "M_initial": m0, "M_final": last["M"][0],
+            "M_ratio": last["M_over_initial"],
+            "peak_stress_initial": rows[0]["peak_ply_stress"],
+            "peak_stress_final": last["peak_ply_stress"],
+            "stress_ratio": (last["peak_ply_stress"] / rows[0]["peak_ply_stress"]
+                             if rows[0]["peak_ply_stress"] > 0 else None),
+            **({"composite_action_initial": pc0["composite_action"],
+                "composite_action_final": pcl["composite_action"],
+                "EI_effective_ratio": (pcl["EI_effective"] / pc0["EI_effective"]
+                                       if pc0["EI_effective"] else None)}
+               if pc0 and pcl and pc0.get("EI_effective") else {}),
+        },
+        "definition": ("준탄성: E(t) = E∞ + (E0 − E∞)exp(−t/τ) 를 넣고 매 시점 ABD 를 다시 "
+                       "조립해 **곡률을 고정한 채** 분할 풀이한다(§19.14). 필요 모멘트와 ply "
+                       "응력이 시간에 따라 떨어지는 것이 크리스 잔류의 물리다"),
+    }
+    warn = list(warnings)
+    warn.append(item("W130", field="definition",
+                     detail="준탄성(quasi-elastic) 근사다 — 각 시점을 탄성 문제로 풀 뿐 유전적분을 "
+                            "하지 않는다. 단일 지수(Prony 1항)라 실제 다중 완화시간을 못 담는다. "
+                            "경향 판단용이다"))
+    ei_ratio = data["relaxation"].get("EI_effective_ratio")
+    if data["relaxation"]["M_ratio"] is not None and data["relaxation"]["M_ratio"] > 0.95:
+        extra = ""
+        if ei_ratio is not None and ei_ratio < 0.9:
+            extra = (f" 다만 **부분합성 유효 굽힘강성은 {ei_ratio:.3g}배로 떨어진다** — 순응층의 "
+                     f"진짜 역할은 굽힘강성 기여가 아니라 전단 결합이라 CLT ABD 로는 이 효과가 "
+                     f"보이지 않는다. partial_composite 값을 볼 것")
+        warn.append(item("W130", field="relaxation.M_ratio",
+                         detail=f"CLT 기준 모멘트가 {100 * (1 - data['relaxation']['M_ratio']):.1f}% 만 "
+                                f"이완했다 — 점탄성층이 얇거나 무르면 ABD 기여가 작다." + extra))
+    if core_k is not None and span_si is None:
+        warn.append(item("W120", field="span",
+                         detail=f"laminae[{core_k}] 가 이완하는 순응층인데 span 이 없어 부분합성 "
+                                f"이완을 보지 못했다 — 폴더블 스택은 이쪽이 지배적이다"))
+    if last["time_s"] < 3.0 * max(si.plies[k].ve_tau_s for k in ve_idx):
+        warn.append(item("W120", field="times_s",
+                         detail=f"최종 시점이 완화 시정수의 3배 미만이다 — 이완이 아직 진행 중이라 "
+                                f"최종값이 평형이 아니다"))
+
+    hash_payload = {"laminate": payload, "times_s": times_s, "kappa": kappa,
+                    "bend_radius": bend_radius, "bend_axis": bend_axis, "width": width,
+                    "epsilon0": epsilon0, "span": span}
+    if ENV.contains_nan_inf(data):
+        return ENV.build(data=None, errors=[item("E403", field="data")], warnings=warn,
+                         payload=hash_payload, unit_system=si.unit_system,
+                         include_debug=include_debug, t0=t0)
+    return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
+                     unit_system=si.unit_system,
+                     assumptions_extra=[
+                         "준탄성 근사 — 시점별 탄성 해, 유전적분 없음. 단일 지수 완화",
+                         "점탄성층의 E2·G12 는 E1 과 같은 비율로 이완한다고 본다(등방 근사)",
+                         "곡률은 전 시점 고정 — 변위 제어(§19.14)와 같은 분할 풀이",
+                         *_source_assumptions(si),
+                     ], include_debug=include_debug, t0=t0)

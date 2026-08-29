@@ -581,6 +581,72 @@ def homogenize_patterned_layer(components: list[dict]) -> dict:
 
 
 @mcp.tool()
+def assess_bonded_lap_joint(laminate: dict, adhesive: dict, overlap: float, load: float,
+                            laminate_2: dict | None = None,
+                            joint_type: str = "double_lap") -> dict:
+    """접착 겹치기 이음 — "겹침을 늘리면 강해진다"는 직관을 반박한다.
+
+    Volkersen 전단지연: ω²=(G_a/t_a)(1/EA₁+1/EA₂), τ_peak/τ_avg=(ωL/2)coth(ωL/2).
+    **ωL/2 ≫ 1 이면 τ_peak 가 겹침 길이에 무관해진다** — 실측(Al 2mm, G_a=1 GPa, t_a=0.2mm)으로
+    L=25→50 mm 에서 평균은 절반이 되는데 **피크는 1.003배만 준다**.
+    adhesive = {"G", "thickness", "shear_strength"?}. overlap·load 는 단위 폭당.
+    laminate_2 생략 시 같은 피착재로 본다.
+    **joint_type**: "double_lap"(기본, 편심 없음 — Volkersen 유효) |
+    "single_lap"(편심 있음 — 굽힘 peel 이 보통 먼저 파손시키는데 Volkersen 은 peel 을
+    모델링하지 않아 **비보수**다. W130 으로 강하게 알린다).
+    반환: τ 분포, peak_over_average, **overlap_efficiency**(겹침 중 실효 비율),
+    **saturation_overlap**(이걸 넘으면 더 늘려도 소용없는 길이), 여유율.
+    """
+    return _guarded(PIPE.run_lap_joint, laminate, adhesive=adhesive, overlap=overlap,
+                    load=load, laminate_2=laminate_2, joint_type=joint_type)
+
+
+@mcp.tool()
+def assess_notched_strength(laminate: dict, hole_diameter: float,
+                            unnotched_strength: float | None = None,
+                            d0: float | None = None, a0: float | None = None) -> dict:
+    """원공 노치 — **확정값 K_T** 와 **조건부값 σ_OH** 를 분리해서 준다.
+
+    K_T∞ = 1 + √(2(√(Ex/Ey) − νxy) + Ex/Gxy) 는 **순수 폐형해**다(등방에서 정확히 3).
+    적층에 따라 크게 갈린다 — 준등방 3.00, [0/90]s 4.92, UD 6.75.
+    노치 강도는 Whitney–Nuismer 로 계산하는데 **d0(점응력)·a0(평균응력)는 재료·적층별
+    시험 피팅 상수**이고 답이 여기에 강하게 민감하다 — 실측 [±45/0/90]s φ6.35 에서
+    d0 = 0.5~2.0 mm 만 바꿔도 σ_OH 가 234~368 MPa 로 갈린다.
+    **그래서 d0/a0 를 주지 않으면 σ_OH 를 아예 내지 않는다**(의도적 — 임의 기본값을 쓰면
+    그럴듯한 오답이 된다). unnotched_strength 와 함께 주면 계산하되 W130 으로 종속을 명시한다.
+    무한 판 가정이라 구멍이 판 폭의 1/5 를 넘으면 유한 폭 보정이 필요하다.
+    """
+    return _guarded(PIPE.run_notched_strength, laminate, hole_diameter=hole_diameter,
+                    unnotched_strength=unnotched_strength, d0=d0, a0=a0)
+
+
+@mcp.tool()
+def solve_stress_relaxation(laminate: dict, times_s: list,
+                            bend_radius: float | None = None, kappa: list | None = None,
+                            bend_axis: str = "x", width: str = "free",
+                            epsilon0: list | None = None, span: float | None = None) -> dict:
+    """**곡률을 고정한 채** 점탄성층이 이완할 때 M(t)·ply 응력이 떨어지는 것을 본다.
+
+    점탄성만 단독으로 보면 값이 작다 — 얇고 무른 층은 ABD 기여가 작아 자유 경계 곡률이
+    몇 % 만 변한다. **진짜 질문은 변위를 고정했을 때다**: 폴더블을 접어 둔 채 시간이 지나면
+    필요 모멘트와 ply 응력이 얼마나 떨어지는가 — 크리스(crease) 잔류의 실제 물리이고
+    변위 제어(solve_prescribed_curvature)와 짝지어야만 물을 수 있다.
+    준탄성: E(t) = E∞ + (E0 − E∞)exp(−t/τ). ply 에 material.viscoelastic {E0, Einf, tau_s} 필요.
+    bend_radius(또는 kappa)로 곡률을 지정하고 times_s 에 시점들을 준다(최대 20개).
+    width 는 §19.14 와 같은 규약("free"=M_y 0, "constrained"=κ_y 0).
+    **span 을 주면 부분합성 이완도 함께 낸다 — 폴더블은 이쪽이 지배적이다.** 순응층의 진짜
+    역할은 굽힘강성 기여가 아니라 **전단 결합**이라 CLT ABD 로는 이완 효과가 거의 안 보인다
+    (실측 M 이완 0.0%). 같은 스택을 부분합성으로 보면 합성도가 73%→18%, 유효 굽힘강성이
+    **0.37배**로 무너진다.
+    반환: 시점별 M·N·최대 ply 응력·부분합성, **M_ratio·stress_ratio·EI_effective_ratio**.
+    한계: 준탄성 근사(유전적분 없음)·단일 지수 완화 — 경향 판단용이다(W130).
+    """
+    return _guarded(PIPE.run_stress_relaxation, laminate, times_s=times_s, kappa=kappa,
+                    bend_radius=bend_radius, bend_axis=bend_axis, width=width,
+                    epsilon0=epsilon0, span=span)
+
+
+@mcp.tool()
 def get_reference_cases(case_id: str | None = None) -> dict:
     """내장 기준 케이스를 반환한다. case_id 생략 시 목록.
 

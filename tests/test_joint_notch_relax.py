@@ -198,9 +198,9 @@ def test_partial_composite_path_shows_the_real_relaxation():
                                       bend_radius=5.0, span=10.0)
     d = env["data"]
     rl = d["relaxation"]
-    assert rl["composite_action_initial"] > 0.8
-    assert rl["composite_action_final"] < 0.3
-    assert rl["EI_effective_ratio"] < 0.4
+    assert rl["composite_action_initial"] > 0.6
+    assert rl["composite_action_final"] < 0.1
+    assert rl["EI_effective_ratio"] < 0.7
     # 합성도가 시간에 따라 단조 감소
     fs = [r["partial_composite"]["composite_action"] for r in d["times"]]
     assert fs == sorted(fs, reverse=True)
@@ -221,3 +221,34 @@ def test_relaxation_deterministic_and_sorted():
                                     bend_radius=5.0, span=10.0)
     assert [r["time_s"] for r in a["data"]["times"]] == [0.0, 3600.0, 36000.0]
     assert a["data"]["times"] == b["data"]["times"]     # 입력 순서 무관
+
+
+# --- PC2-04 / RLX-01: 이완 경로의 횡전단·굽힘축 --------------------------------
+
+def test_relaxation_uses_transverse_shear_not_inplane_g12():
+    """이완 부분합성은 g13(각도 변환 포함)을 써야 한다 — 면내 G12 가 아니다."""
+    face = {"type": "orthotropic_2d", "E1": 70000.0, "E2": 70000.0, "G12": 27000.0, "nu12": 0.3}
+    ve_core = {"type": "orthotropic_2d", "E1": 3.0, "E2": 3.0, "G12": 1.0, "nu12": 0.4,
+               "G13": 0.1, "G23": 0.1,
+               "viscoelastic": {"E0": 3.0, "Einf": 0.3, "tau_s": 3600.0}}
+    lam = {"unit_system": "SI_mm", "laminae": [
+        {"material": face, "angle_deg": 0.0, "thickness": 0.5},
+        {"material": ve_core, "angle_deg": 0.0, "thickness": 1.0},
+        {"material": face, "angle_deg": 0.0, "thickness": 0.5}]}
+    d = srv.solve_stress_relaxation(lam, times_s=[0.0, 36000.0], bend_radius=50.0,
+                                    span=30.0)["data"]
+    g0 = d["times"][0]["partial_composite"]["G_core"][0]
+    assert g0 == pytest.approx(0.1, rel=1e-9)        # G13 이지 G12(=1.0) 가 아니다
+    # 이완하면 횡전단도 같은 비로 떨어진다
+    assert d["times"][-1]["partial_composite"]["G_core"][0] < g0
+
+
+def test_relaxation_moment_follows_bend_axis():
+    """bend_axis='y' 면 M_y 로 비를 낸다 — M_x(≈0)로 내면 '100% 이완'이 된다."""
+    for axis, name in (("x", "M_x"), ("y", "M_y")):
+        d = srv.solve_stress_relaxation(fold(), times_s=[0.0, 36000.0],
+                                        bend_radius=5.0, bend_axis=axis)["data"]["relaxation"]
+        assert d["M_component"] == name
+        assert d["bend_axis"] == axis
+        assert abs(d["M_initial"]) > 1e-6
+        assert 0.9 < d["M_ratio"] <= 1.0

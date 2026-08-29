@@ -101,13 +101,14 @@ def test_composite_action_increases_with_span():
 # ── Tool 계층 ───────────────────────────────────────────────────────────────
 
 def test_measured_foldable_case():
-    """실측 랜드마크: UTG/OCA/UTG, OCA G=0.3 MPa, L=10mm → f≈57.4%, CLT 10.09배 과대.
+    """실측 랜드마크: UTG/OCA/UTG, OCA G=0.3 MPa, L=10mm → f≈56.1%, CLT 10.354배 과대.
 
-    (적대 검증 PC-01 이전에는 선형결합이라 f=46.8%·2.03배로 잘못 나왔다.)
+    이력. PC-01 이전에는 선형결합이라 f=46.8%·2.03배, PC2-02(1D 규약 통일) 이전에는
+    f=57.4%·10.09배였다. 지금 값은 독립 FE 와 2e-5 이내로 일치한다.
     """
     d = srv.assess_partial_composite_bending(stack(), span=10.0)["data"]
-    assert d["composite_action"] == pytest.approx(0.574, rel=0.02)
-    assert d["clt_overprediction"] == pytest.approx(10.09, rel=0.02)
+    assert d["composite_action"] == pytest.approx(0.5615, rel=0.02)
+    assert d["clt_overprediction"] == pytest.approx(10.354, rel=0.02)
     assert d["EI_layered"] < d["EI_effective"] < d["EI_full_CLT"]
     assert d["core_ply"]["index"] == 1 and d["core_ply"]["detected"] == "auto"
 
@@ -125,7 +126,7 @@ def test_stiff_interlayer_is_not_detected():
     """이웃 대비 10배 이상 무르지 않으면 순응층이 아니다 — CLT 가 이미 맞다."""
     env = srv.assess_partial_composite_bending(stack(mid=STIFF_MID), span=10.0)
     assert env["errors"][0]["code"] == "E100"
-    assert "무른 중간층을 찾지 못했" in env["errors"][0]["message"]
+    assert "중간층을 찾지 못했" in env["errors"][0]["message"]
 
 
 def test_explicit_core_ply_and_errors():
@@ -243,3 +244,106 @@ def test_stiff_inner_run_is_still_rejected():
         {"material": UTG, "angle_deg": 0.0, "thickness": 0.03}]}
     r = srv.assess_partial_composite_bending(lam, span=10.0)
     assert r["errors"][0]["code"] == "E100"
+
+
+# --- PC2-01: 순응층이 여러 개인 스택 (N층 Newmark) ----------------------------
+
+def _stack(mats):
+    return {"unit_system": "SI_mm",
+            "laminae": [{"material": m, "angle_deg": 0.0, "thickness": t} for m, t in mats]}
+
+
+_GLASS_2CORE = _stack([(UTG, 0.03), (OCA, 0.05), (UTG, 0.03), (OCA, 0.05), (UTG, 0.03)])
+
+
+def test_two_compliant_cores_are_both_modelled():
+    """유리/OCA/유리/OCA/유리 — 계면이 둘이다. 하나만 보면 6.6배 비보수였다."""
+    d = srv.assess_partial_composite_bending(_GLASS_2CORE, span=10.0)["data"]
+    assert [c["indices"] for c in d["compliant_cores"]] == [[1], [3]]
+    assert d["interface_count"] == 2
+    assert [fp["plies"] for fp in d["faces"]] == [[0, 0], [2, 2], [4, 4]]
+
+
+def test_two_core_stack_matches_independent_reference():
+    """독립 유한요소(적대 검증 PC2-01 이 제시한 값)와 일치한다."""
+    d = srv.assess_partial_composite_bending(_GLASS_2CORE, span=10.0)["data"]
+    # EI_eff = 1.30727e-3 N·m = 1.30727 N·mm ; CLT 과대 22.30배
+    assert d["EI_effective"] == pytest.approx(1.30727, rel=2e-4)
+    assert d["clt_overprediction"] == pytest.approx(22.30, rel=2e-3)
+
+
+def test_multi_core_warns_about_interface_count():
+    w = srv.assess_partial_composite_bending(_GLASS_2CORE, span=10.0)["warnings"]
+    assert any("순응층이 2개" in x["message"] for x in w)
+
+
+def test_two_core_limits_close():
+    """K→0 은 Σ EI_i, K→∞ 는 평행축 상한 — 계면이 둘이어도 닫힌다."""
+    ea = [1.0e6, 2.0e6, 1.5e6]
+    ei = [3.0, 5.0, 4.0]
+    z = [0.0, 1.0e-3, 2.2e-3]
+    lo = PC.partial_interaction(ea, ei, z, [1e-30, 1e-30], 0.01)
+    hi = PC.partial_interaction(ea, ei, z, [1e18, 1e18], 0.01)
+    assert lo["EI_effective"] / lo["EI_layered"] == pytest.approx(1.0, rel=1e-9)
+    assert hi["EI_effective"] / hi["EI_full"] == pytest.approx(1.0, rel=1e-5)
+
+
+def test_single_interface_reduces_to_closed_form():
+    """계면이 하나면 일반해가 2층 폐형해와 **완전히** 같아야 한다."""
+    ea, ei, d = 1.7e6, 2.5, 0.8e-3
+    for span in (1e-3, 1e-2, 2e-1):
+        gen = PC.partial_interaction([ea, ea], [ei, ei], [0.0, d], [6.0e9], span)
+        ei0 = 2 * ei
+        ei_full = ei0 + ea * d * d / 2.0
+        r = (ei_full - ei0) / ei_full
+        a = math.sqrt(6.0e9 * (2.0 / ea + d * d / ei0))
+        x = a * span / 2.0
+        f = 1.0 - 2.0 * (1.0 - 1.0 / math.cosh(x)) / (x * x)
+        assert gen["EI_effective"] == pytest.approx(ei0 / (1.0 - r * f), rel=1e-12)
+
+
+# --- PC2-02(core-span): 바깥 코팅이 탐지를 오염시키면 안 된다 -------------------
+
+_SOFT_COAT = {"type": "isotropic", "E": 3.0, "nu": 0.49}      # G ≈ 1.0 MPa
+_ADHES = {"type": "isotropic", "E": 3.0, "nu": 0.49}
+
+
+def test_outer_soft_coating_does_not_hide_the_core():
+    """내부 구성이 같은데 바깥 코팅 유무로 답이 갈리면 안 된다."""
+    bare = _stack([(UTG, 0.03), (_ADHES, 0.05), (OCA, 0.05), (_ADHES, 0.05), (UTG, 0.03)])
+    coated = _stack([(_SOFT_COAT, 0.02), (UTG, 0.03), (_ADHES, 0.05), (OCA, 0.05),
+                     (_ADHES, 0.05), (UTG, 0.03), (_SOFT_COAT, 0.02)])
+    a = srv.assess_partial_composite_bending(bare, span=10.0)
+    b = srv.assess_partial_composite_bending(coated, span=10.0)
+    assert a["errors"] == [] and b["errors"] == []
+    assert [c["indices"] for c in a["data"]["compliant_cores"]] == [[1, 2, 3]]
+    assert [c["indices"] for c in b["data"]["compliant_cores"]] == [[2, 3, 4]]
+    # 코팅은 굽힘강성을 조금 바꿀 뿐 순응층 탐지를 무너뜨리면 안 된다
+    assert b["data"]["clt_overprediction"] > 4.0
+
+
+def test_plain_cfrp_still_has_no_compliant_core():
+    """오탐 방지 — 균질 CFRP 적층에는 순응층이 없다."""
+    cfrp = {"unit_system": "SI_mm", "laminae": [
+        {"material": {"type": "orthotropic_2d", "E1": 181000.0, "E2": 10300.0,
+                      "G12": 7170.0, "nu12": 0.28}, "angle_deg": a, "thickness": 0.125}
+        for a in (0.0, 45.0, -45.0, 90.0, 90.0, -45.0, 45.0, 0.0)]}
+    assert srv.assess_partial_composite_bending(cfrp, span=100.0)["errors"][0]["code"] == "E100"
+
+
+# --- PC2-07: 횡전단은 각도 변환을 거친다 ---------------------------------------
+
+def test_core_shear_uses_angle_transform():
+    """G13≠G23 인 코어를 90° 로 두면 G_xz = G23 이어야 한다."""
+    aniso = {"type": "orthotropic_2d", "E1": 500.0, "E2": 500.0, "G12": 200.0, "nu12": 0.3,
+             "G13": 0.5, "G23": 0.05}
+    face = {"type": "orthotropic_2d", "E1": 70000.0, "E2": 70000.0, "G12": 27000.0, "nu12": 0.3}
+    mk = lambda ang: {"unit_system": "SI_mm", "laminae": [
+        {"material": face, "angle_deg": 0.0, "thickness": 0.5},
+        {"material": aniso, "angle_deg": ang, "thickness": 2.0},
+        {"material": face, "angle_deg": 0.0, "thickness": 0.5}]}
+    d0 = srv.assess_partial_composite_bending(mk(0.0), span=100.0)["data"]
+    d90 = srv.assess_partial_composite_bending(mk(90.0), span=100.0)["data"]
+    assert d0["core_ply"]["G_transverse"] == pytest.approx(0.5, rel=1e-9)
+    assert d90["core_ply"]["G_transverse"] == pytest.approx(0.05, rel=1e-9)
+    assert d90["composite_action"] < d0["composite_action"]

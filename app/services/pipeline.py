@@ -2913,28 +2913,25 @@ def run_moisture_uptake(payload, diffusion, time_s=None, mode: str = "absorption
 def _compliant_core_gate(si, span_si, warnings, label):
     """순응 중간층이 있으면 CLT 굽힘강성이 과대평가임을 알린다 (§19.12 게이트)."""
     from app.solver import partial_composite as PC
-    span_core = PC.detect_compliant_core(si.plies)
-    if span_core is None or span_si is None or span_si <= 0:
+    runs = PC.detect_compliant_cores(si.plies)
+    if not runs or span_si is None or span_si <= 0:
         return None
-    lo, hi = span_core
     qbars = [MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
              for p_ in si.plies]
     th = list(si.thicknesses)
     A, B, D, _z, _h = _abd_of_plies(si.plies)
-    ea1, ei1 = PC.sublaminate_ea_ei(qbars, th, 0, lo)
-    ea2, ei2 = PC.sublaminate_ea_ei(qbars, th, hi + 1, len(th))
-    _ea_c, ei_c = PC.sublaminate_ea_ei(qbars, th, lo, hi + 1)
-    g_core, t_core = PC.core_shear_and_thickness(si.plies, lo, hi)
-    res = PC.composite_action(ea1, ei1, ea2, ei2, ei_c, float(D[0, 0]),
-                              g_core, t_core, span_si)
+    ei_full_1d = float(D[0, 0]) - float(B[0, 0]) ** 2 / float(A[0, 0]) if A[0, 0] > 0 else float(D[0, 0])
+    res = PC.build_partial_model(si.plies, qbars, th, runs, span_si, ei_full_clt=ei_full_1d)
     f = res.get("composite_action")
     if f is None or f >= 0.9:
         return res
     over = res["EI_full"] / res["EI_effective"] if res["EI_effective"] > 0 else None
-    k_txt = f"laminae[{lo}]" if lo == hi else f"laminae[{lo}..{hi}]"
+    k_txt = ", ".join(f"laminae[{lo}]" if lo == hi else f"laminae[{lo}..{hi}]"
+                      for lo, hi in runs)
     warnings.append(item("W130", field="laminae",
-                         detail=f"{k_txt} 가 이웃보다 10배 이상 무른 순응층이다 — {label} 기준 "
-                                f"합성도 {f * 100:.1f}% 로 **CLT 굽힘강성이 "
+                         detail=f"{k_txt} 가 이웃보다 10배 이상 무른 순응층이다"
+                                f"{f' (계면 {len(runs)}개)' if len(runs) > 1 else ''} — "
+                                f"{label} 기준 합성도 {f * 100:.1f}% 로 **CLT 굽힘강성이 "
                                 f"{over:.3g}배 과대평가**된다. assess_partial_composite_bending "
                                 f"로 확인할 것"))
     return res
@@ -2967,29 +2964,32 @@ def run_partial_composite(payload, span, core_ply=None, include_debug: bool = Fa
                          unit_system=si.unit_system, include_debug=include_debug, t0=t0)
 
     auto = core_ply is None
-    span_core = (PC.detect_compliant_core(si.plies) if auto
-                 else (int(core_ply), int(core_ply)))
-    if span_core is None:
+    if auto:
+        runs = PC.detect_compliant_cores(si.plies)
+    else:
+        # 명시 지정도 그 ply 가 속한 **구간 전체**로 넓힌다 — (k,k) 로 축약하면
+        # 코어를 여러 ply 로 나눈 적층에서 두께가 조용히 반토막 난다.
+        k_req = int(core_ply)
+        detected = PC.detect_compliant_cores(si.plies)
+        owning = [r for r in detected if r[0] <= k_req <= r[1]]
+        runs = owning if owning else [(k_req, k_req)]
+    if not runs:
         return ENV.build(data=None, errors=[item("E100", field="core_ply",
-                                                 detail="이웃보다 10배 이상 무른 중간층을 찾지 못했습니다 — "
-                                                        "순응층이 없으면 CLT 가 이미 맞습니다. "
-                                                        "특정 층을 보려면 core_ply 로 지정하세요")],
+                                                 detail="적층 최대 횡전단강성의 1/10 미만인 중간층을 "
+                                                        "찾지 못했습니다 — 순응층이 없으면 CLT 가 "
+                                                        "이미 맞습니다. 특정 층을 보려면 core_ply 로 "
+                                                        "지정하세요")],
                          warnings=warnings, payload=payload, unit_system=si.unit_system,
                          include_debug=include_debug, t0=t0)
 
-    lo, hi = span_core
-    core = si.plies[lo]
     span_si = float(span) * units.TO_SI[si.unit_system]["length"]
     qbars = [MAT.qbar_matrix(MAT.q_matrix(p_.E1, p_.E2, p_.G12, p_.nu12), p_.angle_deg)
              for p_ in si.plies]
     th = list(si.thicknesses)
     A, B, D, _z, h = _abd_of_plies(si.plies)
-    ea1, ei1 = PC.sublaminate_ea_ei(qbars, th, 0, lo)
-    ea2, ei2 = PC.sublaminate_ea_ei(qbars, th, hi + 1, len(th))
-    _ea_c, ei_c = PC.sublaminate_ea_ei(qbars, th, lo, hi + 1)
-    g_core, t_core = PC.core_shear_and_thickness(si.plies, lo, hi)
-    res = PC.composite_action(ea1, ei1, ea2, ei2, ei_c, float(D[0, 0]),
-                              g_core, t_core, span_si)
+    ei_full_1d = (float(D[0, 0]) - float(B[0, 0]) ** 2 / float(A[0, 0])
+                  if A[0, 0] > 0 else float(D[0, 0]))
+    res = PC.build_partial_model(si.plies, qbars, th, runs, span_si, ei_full_clt=ei_full_1d)
     if res.get("composite_action") is None:
         return ENV.build(data=None, errors=[item("E100", field="laminate",
                                                  detail=f"부분합성을 계산할 수 없습니다: {res.get('reason')}")],
@@ -2999,15 +2999,24 @@ def run_partial_composite(payload, span, core_ply=None, include_debug: bool = Fa
     f = units.FROM_SI[si.unit_system]
     fac = res["composite_action"]
     over = res["EI_full"] / res["EI_effective"] if res["EI_effective"] > 0 else None
+    core_blocks = [{"indices": c["indices"],
+                    "thickness": c["thickness"] * f["z"],
+                    "G_transverse": c["G_transverse"] * f["modulus"],
+                    "angle_deg": si.plies[c["indices"][0]].angle_deg,
+                    "G13_assumed_from_G12": any(si.plies[i].g13 is None for i in c["indices"])}
+                   for c in res["core_shear"]]
+    first = core_blocks[0]
     data = {
-        "core_ply": {"index": lo, "indices": list(range(lo, hi + 1)),
-                     "angle_deg": core.angle_deg,
-                     "thickness": t_core * f["z"],
-                     "G_transverse": g_core * f["modulus"],
+        "core_ply": {"index": first["indices"][0], "indices": first["indices"],
+                     "angle_deg": first["angle_deg"],
+                     "thickness": first["thickness"],
+                     "G_transverse": first["G_transverse"],
                      "detected": "auto" if auto else "explicit",
-                     "merged_plies": hi - lo + 1,
-                     "G13_assumed_from_G12": any(si.plies[i].g13 is None
-                                                 for i in range(lo, hi + 1))},
+                     "merged_plies": len(first["indices"]),
+                     "G13_assumed_from_G12": first["G13_assumed_from_G12"]},
+        "compliant_cores": core_blocks,
+        "faces": [{"plies": fp} for fp in res["faces"]],
+        "interface_count": res["interface_count"],
         "span": float(span),
         "composite_action": fac,
         "EI_layered": res["EI_layered"] * f["D"],
@@ -3015,10 +3024,16 @@ def run_partial_composite(payload, span, core_ply=None, include_debug: bool = Fa
         "EI_effective": res["EI_effective"] * f["D"],
         "clt_overprediction": over,
         "shear_lag": {"alpha": res["alpha"] / f["z"] if res["alpha"] else None,
-                      "alpha_L": res["alpha_L"],
-                      "face_neutral_axis_distance": res["d"] * f["z"]},
-        "definition": ("α² = (G_c/t_c)(1/EA₁ + 1/EA₂ + d²/EI_layered), "
-                       "f = 1 − tanh(αL/2)/(αL/2), EI_eff = EI_layered + f·(EI_full − EI_layered). "
+                      "alpha_L": (min(res["alpha_L"]) if isinstance(res["alpha_L"], list)
+                                  else res["alpha_L"]),
+                      "alpha_L_modes": res["alpha_L"],
+                      "face_neutral_axis_distance": (res["d"] * f["z"] if res.get("d") else None),
+                      "face_distances": [v * f["z"] for v in res.get("face_distances", [])]},
+        "definition": ("Newmark 부분상호작용 정해. 계면이 하나면 "
+                       "α² = (G_c/t_c)(1/EA₁ + 1/EA₂ + d²/EI₀), f = 1 − 2(1 − sech(αL/2))/(αL/2)², "
+                       "**EI_eff = EI₀/(1 − r·f)** (r = ΔEI/EI_full) — 조화형이지 선형결합이 아니다. "
+                       "계면이 둘 이상이면 T″ = R·T + p·M 의 모드 분해로 같은 중앙처짐 등가 강성을 "
+                       "낸다. f 는 그 결과를 단일 계면 척도로 환산한 값이다. "
                        "f=0 은 면재가 각자 굽는 상태, f=1 은 CLT(완전합성)와 같다"),
         "meaning": ("clt_overprediction = CLT 굽힘강성 ÷ 실제 유효 굽힘강성. "
                     "1보다 크면 CLT 를 쓴 처짐·좌굴·진동수가 모두 낙관적이다"),
@@ -3030,14 +3045,27 @@ def run_partial_composite(payload, span, core_ply=None, include_debug: bool = Fa
                          detail=f"합성도 {fac * 100:.1f}% — CLT 기반 도구(solve_load_response, "
                                 f"compute_buckling, compute_natural_frequencies)의 굽힘 관련 값이 "
                                 f"모두 {over:.3g}배 낙관적이다"))
-    if core.g13 is None:
-        warn.append(item("W120", field="core_ply.G_transverse",
-                         detail="순응층에 G13 이 없어 면내 G12 로 대체했다 — 실제 횡전단 강성이 다르면 "
-                                "합성도가 달라진다(α ∝ √G_c). 실측을 넣을 것"))
-    if res["alpha_L"] is not None and res["alpha_L"] < 1.0:
+    assumed = [i for b in core_blocks if b["G13_assumed_from_G12"] for i in b["indices"]]
+    if assumed:
+        warn.append(item("W120", field="compliant_cores.G_transverse",
+                         detail=f"순응층 {assumed} 에 G13 이 없어 면내 G12 로 대체했다 — 실제 횡전단 "
+                                f"강성이 다르면 합성도가 달라진다(α ∝ √G_c). 실측을 넣을 것"))
+    alpha_l_min = data["shear_lag"]["alpha_L"]
+    if alpha_l_min is not None and alpha_l_min < 1.0:
         warn.append(item("W130", field="shear_lag.alpha_L",
-                         detail=f"αL = {res['alpha_L']:.3g} < 1 — 전단 전달이 거의 일어나지 않는 "
+                         detail=f"αL = {alpha_l_min:.3g} < 1 — 전단 전달이 거의 일어나지 않는 "
                                 f"영역이다. 면재가 사실상 따로 굽는다"))
+    if len(core_blocks) > 1:
+        warn.append(item("W130", field="compliant_cores",
+                         detail=f"순응층이 {len(core_blocks)}개다(계면 {res['interface_count']}개) — "
+                                f"N층 Newmark 정해로 전부 풀었다. 2층 폐형해로 하나만 보면 "
+                                f"실측 6.6배(짧은 스팬에서 15배) 비보수다"))
+    resid = res.get("assembly_residual")
+    if resid is not None and abs(resid - 1.0) > 0.01:
+        warn.append(item("W130", field="EI_full_CLT",
+                         detail=f"평행축 조립값이 적층의 CLT 굽힘강성과 {abs(resid - 1) * 100:.1f}% "
+                                f"어긋난다 — 순응층 자신의 축강성이 무시할 수준이 아니라는 뜻이다. "
+                                f"shear-lag 이상화의 전제가 약한 스택이다"))
 
     hash_payload = {"laminate": payload, "span": span, "core_ply": core_ply}
     if ENV.contains_nan_inf(data):
@@ -3047,9 +3075,11 @@ def run_partial_composite(payload, span, core_ply=None, include_debug: bool = Fa
     return ENV.build(data=data, errors=[], warnings=warn, payload=hash_payload,
                      unit_system=si.unit_system,
                      assumptions_extra=[
-                         "shear-lag 3층 보 모델 — 면재는 오일러 보, 순응층은 전단만 전달(축강성 무시)",
+                         "Newmark 부분상호작용 — 면재는 오일러 보, 순응층은 전단만 전달(축강성 무시). "
+                         "순응층이 여러 개면 계면도 그만큼 두고 함께 푼다",
                          "단순지지 스팬 L 의 균일 굽힘 가정. 경계·하중 형태가 다르면 f 가 달라진다",
-                         "d² 는 EI_full − EI_layered 항등식에서 역산해 두 값과 항상 정합한다",
+                         "부분적층 규약은 1D(A11 축강성, B11/A11 중립축, D11−B11²/A11 굽힘강성) — "
+                         "이 조합이라야 평행축 항등식이 전체 적층과 정확히 닫힌다",
                          *_source_assumptions(si),
                      ], include_debug=include_debug, t0=t0)
 
@@ -4229,10 +4259,11 @@ def run_stress_relaxation(payload, times_s, kappa=None, bend_radius=None,
     f = units.FROM_SI[si.unit_system]
     th = list(si.thicknesses)
     z = ABD.z_coordinates(th)
-    _core_span = PC.detect_compliant_core(si.plies)
-    core_k = None if _core_span is None else _core_span[0]
-    if core_k is not None and not any(i in ve_idx for i in range(_core_span[0], _core_span[1] + 1)):
-        core_k = None                     # 이완하지 않는 코어는 볼 이유가 없다
+    all_runs = PC.detect_compliant_cores(si.plies)
+    # 이완하지 않는 코어는 볼 이유가 없다 — 하나라도 점탄성이면 전체를 함께 푼다
+    core_runs = (all_runs if any(i in ve_idx for lo, hi in all_runs
+                                 for i in range(lo, hi + 1)) else [])
+    core_k = core_runs[0][0] if core_runs else None
     span_si = None
     if span is not None:
         if not _num_ok(span):
@@ -4244,11 +4275,13 @@ def run_stress_relaxation(payload, times_s, kappa=None, bend_radius=None,
     rows = []
     for t_s in sorted(float(x) for x in times_s):
         plies_t = []
+        ve_ratio: dict[int, float] = {}
         for k, p_ in enumerate(si.plies):
             if k in ve_idx:
                 decay = math.exp(-t_s / p_.ve_tau_s) if p_.ve_tau_s > 0 else 0.0
                 e_t = p_.ve_Einf + (p_.ve_E0 - p_.ve_Einf) * decay
                 ratio = e_t / p_.E1 if p_.E1 > 0 else 1.0
+                ve_ratio[k] = ratio          # 횡전단도 같은 비로 이완한다
                 plies_t.append((e_t, p_.E2 * ratio, p_.G12 * ratio, p_.nu12, p_.angle_deg))
             else:
                 plies_t.append((p_.E1, p_.E2, p_.G12, p_.nu12, p_.angle_deg))
@@ -4275,31 +4308,33 @@ def run_stress_relaxation(payload, times_s, kappa=None, bend_radius=None,
         # §19.12 경로 — 순응층의 진짜 역할은 굽힘강성 기여가 아니라 **전단 결합**이다.
         # CLT ABD 만 보면 이완 효과가 0에 가깝지만(실측 0.0%), 부분합성으로 보면 합성도가
         # 73%→18% 로 무너져 유효 굽힘강성이 0.37배가 된다. 순응층이 있으면 함께 낸다.
-        if core_k is not None and span_si is not None:
-            c_lo, c_hi = _core_span
-            # 코어가 여러 ply 로 쪼개져 있으면 직렬 조화평균으로 묶는다 (NC-07)
-            t_core_t = float(sum(th[c_lo:c_hi + 1]))
-            comp = sum(th[i] / plies_t[i][2] if plies_t[i][2] > 0 else math.inf
-                       for i in range(c_lo, c_hi + 1))
-            g_t = t_core_t / comp if comp > 0 and math.isfinite(comp) else 0.0
-            ea1, ei1 = PC.sublaminate_ea_ei(qb, th, 0, c_lo)
-            ea2, ei2 = PC.sublaminate_ea_ei(qb, th, c_hi + 1, len(th))
-            _eac, eic = PC.sublaminate_ea_ei(qb, th, c_lo, c_hi + 1)
-            pcr = PC.composite_action(ea1, ei1, ea2, ei2, eic, float(D[0, 0]),
-                                      g_t, t_core_t, span_si)
+        if core_runs and span_si is not None:
+            # **횡전단은 g13(각도 변환 포함)이지 면내 G12 가 아니다** — 전에는 plies_t[i][2]
+            # (=G12)를 써서 같은 적층에서 assess_partial_composite_bending 과 3.3배
+            # 어긋났다(적대 검증 PC2-04/PC2-02). 이완 배수만 곱해 넘긴다.
+            scale = [ve_ratio.get(k, 1.0) for k in range(len(si.plies))]
+            ei_full_1d_t = (float(D[0, 0]) - float(B[0, 0]) ** 2 / float(A[0, 0])
+                            if A[0, 0] > 0 else float(D[0, 0]))
+            pcr = PC.build_partial_model(si.plies, qb, th, core_runs, span_si,
+                                         ei_full_clt=ei_full_1d_t, shear_scale=scale)
             row["partial_composite"] = {
                 "composite_action": pcr.get("composite_action"),
                 "EI_effective": (pcr["EI_effective"] * f["D"]
                                  if pcr.get("EI_effective") is not None else None),
-                "G_core": g_t * f["modulus"],
+                "G_core": [c["G_transverse"] * f["modulus"] for c in pcr.get("core_shear", [])],
+                "interface_count": pcr.get("interface_count"),
             }
         rows.append(row)
 
-    m0 = rows[0]["M"][0]
+    # **굽힘축을 따라간다.** bend_axis='y' 면 지정된 것은 κ_y 라 M_x 는 애초에 거의 0 이고,
+    # 그 0 을 기준으로 비를 내면 "모멘트가 100% 이완했다"는 헛말이 나온다(완결성 비평 RLX-01).
+    m_idx = 1 if bend_axis == "y" else 0
+    m_name = "M_y" if m_idx == 1 else "M_x"
+    m0 = rows[0]["M"][m_idx]
     pc0 = rows[0].get("partial_composite")
     pcl = rows[-1].get("partial_composite")
     for r in rows:
-        r["M_over_initial"] = (r["M"][0] / m0) if m0 != 0 else None
+        r["M_over_initial"] = (r["M"][m_idx] / m0) if m0 != 0 else None
     last = rows[-1]
     data = {
         "viscoelastic_plies": ve_idx,
@@ -4307,7 +4342,8 @@ def run_stress_relaxation(payload, times_s, kappa=None, bend_radius=None,
                                               "kappa_y", "kappa_xy"), presc) if v is not None],
         "times": rows,
         "relaxation": {
-            "M_initial": m0, "M_final": last["M"][0],
+            "M_component": m_name, "bend_axis": bend_axis,
+            "M_initial": m0, "M_final": last["M"][m_idx],
             "M_ratio": last["M_over_initial"],
             "peak_stress_initial": rows[0]["peak_ply_stress"],
             "peak_stress_final": last["peak_ply_stress"],
@@ -4321,7 +4357,8 @@ def run_stress_relaxation(payload, times_s, kappa=None, bend_radius=None,
         },
         "definition": ("준탄성: E(t) = E∞ + (E0 − E∞)exp(−t/τ) 를 넣고 매 시점 ABD 를 다시 "
                        "조립해 **곡률을 고정한 채** 분할 풀이한다(§19.14). 필요 모멘트와 ply "
-                       "응력이 시간에 따라 떨어지는 것이 크리스 잔류의 물리다"),
+                       "응력이 시간에 따라 떨어지는 것이 크리스 잔류의 물리다. "
+                       "M_ratio 는 굽힘축에 대응하는 성분(M_component)으로 낸다"),
     }
     warn = list(warnings)
     warn.append(item("W130", field="definition",

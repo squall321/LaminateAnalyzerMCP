@@ -456,7 +456,8 @@ def assess_partial_composite_bending(laminate: dict, span: float,
     shear-lag 폐형해: α² = (G_c/t_c)(1/EA₁+1/EA₂+d²/EI_layered), f = 1 − tanh(αL/2)/(αL/2).
     **span(굽힘 스팬)이 필수다** — 합성도가 스팬에 강하게 의존한다
     (실측 UTG/OCA/UTG, OCA G=0.3 MPa: L=1mm 에서 CLT 22.1배 과대, L=10mm 10.09배, L=200mm 1.03배).
-    core_ply 생략 시 이웃보다 10배 이상 무른 중간층을 자동 탐지한다.
+    core_ply 생략 시 이웃보다 10배 이상 무른 중간층을 자동 탐지한다. 코어를 여러 ply 로
+    쪼개 모델링해도(중앙 절점 배치 등) 하나로 묶어 같은 답을 낸다.
     반환: composite_action f(0=각자 굼, 1=CLT와 동일), EI_layered/EI_full_CLT/EI_effective,
     **clt_overprediction**(CLT ÷ 실제 — 1보다 크면 처짐·좌굴·진동수가 모두 낙관적).
     순응층의 G13 이 없으면 G12 로 대체하고 W120 으로 알린다(α ∝ √G_c 라 민감하다).

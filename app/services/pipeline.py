@@ -2324,9 +2324,24 @@ def _stability_gate(si, n_si, panel, warnings, r_strength=None):
     반환: (governing 블록 또는 None). 경고는 warnings 에 덧붙인다.
     """
     from app.solver import plate_navier as NAV
-    nx, ny = float(n_si[0]), float(n_si[1])
-    if nx >= 0.0 and ny >= 0.0:
-        return None                     # 압축 성분이 없으면 좌굴은 무관하다
+    nx, ny, nxy = float(n_si[0]), float(n_si[1]), float(n_si[2])
+    # **주응력으로 판정한다.** Nx·Ny 만 보면 순수 전단(Nxy)에서 침묵하는데, 순수 전단은
+    # ±45° 주축에서 크기 |Nxy| 의 압축이라 얇은 판은 반드시 좌굴한다 — 적대 검증에서
+    # 같은 응력상태를 주축으로 쓰면 좌굴 지배(10.9배 모순)가 나오는 것이 확인됐다.
+    scale = max(abs(nx), abs(ny), abs(nxy))
+    if scale <= 0.0:
+        return None
+    mid, rad = 0.5 * (nx + ny), math.hypot(0.5 * (nx - ny), nxy)
+    n_min = mid - rad
+    # 상대 문턱 — 수치 잔여(예: 변위 제어 체인의 N ≈ −7e-33)를 압축으로 오인하지 않는다
+    if n_min >= -1e-9 * scale:
+        return None
+    if abs(nxy) > 1e-9 * scale:
+        warnings.append(item("W130", field="loads.N",
+                             detail=f"면내 전단 Nxy 가 있다 — 주응력 기준으로 압축 성분이 존재한다"
+                                    f"(최소 주력 {n_min:.4g}). **이 서버는 전단 좌굴을 풀지 못한다**"
+                                    f"(compute_buckling 은 Nxy 미지원). 좌굴 순위는 Nx·Ny 성분만으로 "
+                                    f"낸 것이라 전단 좌굴을 놓칠 수 있다"))
     if panel is None:
         warnings.append(item("W130", field="loads.N",
                              detail="면내 **압축**이 걸려 있는데 panel 이 없어 좌굴을 확인할 수 없다. "
@@ -2336,6 +2351,12 @@ def _stability_gate(si, n_si, panel, warnings, r_strength=None):
         return None
     lx, ly = _panel_to_si(panel, si.unit_system)
     if lx is None:
+        # panel 이 주어졌는데 형식이 틀리면 **조용히 끄지 않는다** — panel 을 준 사용자는
+        # 게이트가 돌았다고 믿게 되므로 panel 미지정보다 위험하다(적대 검증 GATE-01).
+        warnings.append(item("W130", field="panel",
+                             detail="panel 형식이 유효하지 않아(지원 키는 Lx·Ly 뿐) 좌굴 게이트를 "
+                                    "돌리지 못했다 — **강도 판정만으로 안전을 보고하지 말 것**. "
+                                    "compute_buckling 은 같은 panel 에 E100 을 낸다"))
         return None
     if nx >= 0.0:
         warnings.append(item("W130", field="loads.N",
@@ -2347,7 +2368,14 @@ def _stability_gate(si, n_si, panel, warnings, r_strength=None):
     res = NAV.buckling_ncr(d_use, lx, ly, ratio)
     if res["N_cr"] is None:
         return None
-    r_buckling = res["N_cr"] / abs(nx)
+    # 횡전단 유연성 보정 — 원시 CLT N_cr 은 두꺼운 판·샌드위치에서 크게 비보수다
+    # (적대 검증 GATE-02: 샌드위치에서 220배). compute_buckling 과 같은 보정을 건다.
+    n_cr_si = res["N_cr"]
+    flex = _shear_flexibility(si, d_use, lx, ly, res["mode_m"], res["mode_n"],
+                              warnings, si.unit_system)
+    if flex and flex.get("buckling_factor") is not None:
+        n_cr_si = n_cr_si * flex["buckling_factor"]
+    r_buckling = n_cr_si / abs(nx)
     modes = {"buckling": r_buckling}
     if r_strength is not None:
         modes["strength"] = r_strength
@@ -2356,7 +2384,9 @@ def _stability_gate(si, n_si, panel, warnings, r_strength=None):
         "governing_mode": name,
         "margin": modes[name],
         "margins": modes,
-        "buckling": {"N_cr": res["N_cr"] * units.FROM_SI[si.unit_system]["A"],
+        "buckling": {"N_cr": n_cr_si * units.FROM_SI[si.unit_system]["A"],
+                     "N_cr_uncorrected": res["N_cr"] * units.FROM_SI[si.unit_system]["A"],
+                     "shear_flexibility_applied": bool(flex and flex.get("buckling_factor")),
                      "mode": {"m": res["mode_m"], "n": res["mode_n"]},
                      "load_ratio_Ny_over_Nx": ratio,
                      "boundary": "simply_supported"},
